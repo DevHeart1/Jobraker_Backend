@@ -4,7 +4,15 @@ from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from django.contrib.auth import get_user_model
+from drf_spectacular.utils import extend_schema, extend_schema_view, OpenApiParameter, OpenApiExample, OpenApiResponse
+from drf_spectacular.openapi import OpenApiTypes
 from .models import Job, Application, SavedJob, JobAlert, JobSource
+from .serializers import (
+    JobSerializer, JobListSerializer, ApplicationSerializer, SavedJobSerializer,
+    JobAlertSerializer, JobSearchSerializer, BulkApplySerializer,
+    JobSearchResultSerializer, JobRecommendationSerializer, ApplicationStatsSerializer,
+    SuccessResponseSerializer, ErrorResponseSerializer
+)
 
 User = get_user_model()
 

@@ -381,14 +381,70 @@ class JobSearchSerializer(serializers.Serializer):
         return attrs
 
 
+@extend_schema_serializer(
+    examples=[
+        OpenApiExample(
+            'Bulk Apply Request',
+            summary='Apply to multiple jobs at once',
+            description='Efficient bulk application to multiple job positions',
+            value={
+                "job_ids": [
+                    "550e8400-e29b-41d4-a716-446655440000",
+                    "660f9500-f39c-52e5-b827-557766551111",
+                    "770fa600-f49d-63f6-c938-668877662222"
+                ],
+                "cover_letter": "I am interested in applying to these positions because of my relevant experience in Python development and my passion for building innovative solutions..."
+            },
+            request_only=True
+        ),
+        OpenApiExample(
+            'Bulk Apply Response',
+            summary='Bulk application results',
+            description='Results of bulk application operation with success/failure details',
+            value={
+                "successful_applications": 2,
+                "failed_applications": 1,
+                "details": [
+                    {
+                        "job_id": "550e8400-e29b-41d4-a716-446655440000",
+                        "status": "success",
+                        "application_id": "aa0fb700-f59e-74g7-d049-779988771111"
+                    },
+                    {
+                        "job_id": "660f9500-f39c-52e5-b827-557766551111",
+                        "status": "success",
+                        "application_id": "bb0fb700-f59e-74g7-d049-779988772222"
+                    },
+                    {
+                        "job_id": "770fa600-f49d-63f6-c938-668877662222",
+                        "status": "failed",
+                        "error": "Already applied to this job"
+                    }
+                ]
+            },
+            response_only=True
+        )
+    ]
+)
 class BulkApplySerializer(serializers.Serializer):
-    """Serializer for bulk job application."""
+    """
+    Serializer for bulk job application operations.
+    
+    Allows users to apply to multiple jobs simultaneously with
+    a single cover letter. Validates job existence and handles
+    bulk processing efficiently.
+    """
     job_ids = serializers.ListField(
         child=serializers.UUIDField(),
         min_length=1,
-        max_length=50
+        max_length=50,
+        help_text="List of job UUIDs to apply to (max 50 jobs)"
     )
-    cover_letter = serializers.CharField(required=False, max_length=5000)
+    cover_letter = serializers.CharField(
+        required=False, 
+        max_length=5000,
+        help_text="Cover letter to use for all applications"
+    )
     
     def validate_job_ids(self, value):
         """Validate that all job IDs exist."""
@@ -399,3 +455,180 @@ class BulkApplySerializer(serializers.Serializer):
             raise serializers.ValidationError(f"Jobs not found: {list(missing_jobs)}")
         
         return value
+
+
+@extend_schema_serializer(
+    examples=[
+        OpenApiExample(
+            'Job Search Results',
+            summary='Paginated job search results',
+            description='Search results with pagination and filtering metadata',
+            value={
+                "count": 156,
+                "next": "http://api.example.com/jobs/search/?page=2",
+                "previous": None,
+                "results": [
+                    {
+                        "id": "550e8400-e29b-41d4-a716-446655440000",
+                        "title": "Senior Python Developer",
+                        "company": "TechCorp Inc.",
+                        "location": "San Francisco, CA",
+                        "salary_range_display": "$120,000 - $160,000",
+                        "is_remote": True,
+                        "posted_date": "2025-06-15T10:00:00Z",
+                        "match_score": 92.5
+                    }
+                ]
+            }
+        )
+    ]
+)
+class JobSearchResultSerializer(serializers.Serializer):
+    """
+    Serializer for job search results with pagination and matching scores.
+    
+    Provides structured response for job search API endpoints
+    with pagination metadata and AI-powered matching scores.
+    """
+    count = serializers.IntegerField(help_text="Total number of matching jobs")
+    next = serializers.URLField(required=False, allow_null=True, help_text="URL for next page")
+    previous = serializers.URLField(required=False, allow_null=True, help_text="URL for previous page")
+    results = JobListSerializer(many=True, help_text="List of matching jobs")
+
+
+@extend_schema_serializer(
+    examples=[
+        OpenApiExample(
+            'Job Recommendations',
+            summary='AI-powered job recommendations',
+            description='Personalized job recommendations based on user profile and preferences',
+            value={
+                "recommendations": [
+                    {
+                        "id": "550e8400-e29b-41d4-a716-446655440000",
+                        "title": "Senior Python Developer",
+                        "company": "TechCorp Inc.",
+                        "location": "San Francisco, CA",
+                        "salary_range_display": "$120,000 - $160,000",
+                        "is_remote": True,
+                        "posted_date": "2025-06-15T10:00:00Z",
+                        "match_score": 94.2,
+                        "match_reasons": [
+                            "Skills match: Python, Django, PostgreSQL",
+                            "Experience level: Senior (5+ years)",
+                            "Location preference: Remote work"
+                        ]
+                    }
+                ],
+                "total_recommendations": 25,
+                "generated_at": "2025-06-16T08:00:00Z"
+            }
+        )
+    ]
+)
+class JobRecommendationSerializer(serializers.Serializer):
+    """
+    Serializer for AI-powered job recommendations.
+    
+    Provides personalized job recommendations with matching scores
+    and explanations for why jobs were recommended.
+    """
+    recommendations = JobListSerializer(many=True, help_text="List of recommended jobs")
+    total_recommendations = serializers.IntegerField(help_text="Total number of available recommendations")
+    generated_at = serializers.DateTimeField(help_text="When recommendations were generated")
+
+
+@extend_schema_serializer(
+    examples=[
+        OpenApiExample(
+            'Application Statistics',
+            summary='User application statistics',
+            description='Overview of user job application activity and success rates',
+            value={
+                "total_applications": 45,
+                "pending_applications": 12,
+                "interview_requests": 8,
+                "offers_received": 3,
+                "rejections": 22,
+                "success_rate": 24.4,
+                "average_response_time": 5.2,
+                "most_applied_job_type": "full_time",
+                "most_applied_location": "San Francisco, CA"
+            }
+        )
+    ]
+)
+class ApplicationStatsSerializer(serializers.Serializer):
+    """
+    Serializer for application statistics and analytics.
+    
+    Provides insights into user application patterns and success rates.
+    """
+    total_applications = serializers.IntegerField(help_text="Total number of applications submitted")
+    pending_applications = serializers.IntegerField(help_text="Applications waiting for response")
+    interview_requests = serializers.IntegerField(help_text="Number of interview requests received")
+    offers_received = serializers.IntegerField(help_text="Number of job offers received")
+    rejections = serializers.IntegerField(help_text="Number of rejections received")
+    success_rate = serializers.FloatField(help_text="Success rate percentage")
+    average_response_time = serializers.FloatField(help_text="Average response time in days")
+    most_applied_job_type = serializers.CharField(help_text="Most frequently applied job type")
+    most_applied_location = serializers.CharField(help_text="Most frequently applied location")
+
+
+@extend_schema_serializer(
+    examples=[
+        OpenApiExample(
+            'Success Response',
+            summary='Generic success response',
+            description='Standard success response for operations',
+            value={
+                "success": True,
+                "message": "Job saved successfully",
+                "data": {
+                    "job_id": "550e8400-e29b-41d4-a716-446655440000",
+                    "saved_at": "2025-06-16T10:30:00Z"
+                }
+            }
+        )
+    ]
+)
+class SuccessResponseSerializer(serializers.Serializer):
+    """
+    Standard success response serializer.
+    
+    Used for operations that don't return complex data
+    but need to confirm success with optional metadata.
+    """
+    success = serializers.BooleanField(default=True, help_text="Operation success status")
+    message = serializers.CharField(help_text="Success message")
+    data = serializers.DictField(required=False, help_text="Optional additional data")
+
+
+@extend_schema_serializer(
+    examples=[
+        OpenApiExample(
+            'Error Response',
+            summary='Generic error response',
+            description='Standard error response format',
+            value={
+                "success": False,
+                "error": "Validation failed",
+                "details": {
+                    "job_id": ["This field is required."],
+                    "cover_letter": ["Ensure this field has at most 5000 characters."]
+                },
+                "error_code": "VALIDATION_ERROR"
+            }
+        )
+    ]
+)
+class ErrorResponseSerializer(serializers.Serializer):
+    """
+    Standard error response serializer.
+    
+    Provides consistent error response format across all endpoints.
+    """
+    success = serializers.BooleanField(default=False, help_text="Operation success status")
+    error = serializers.CharField(help_text="Error message")
+    details = serializers.DictField(required=False, help_text="Detailed error information")
+    error_code = serializers.CharField(required=False, help_text="Machine-readable error code")

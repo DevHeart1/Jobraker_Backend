@@ -7,7 +7,7 @@ from django.contrib.auth import get_user_model, logout
 from django.contrib.auth.password_validation import validate_password
 from django.core.exceptions import ValidationError
 from rest_framework_simplejwt.tokens import RefreshToken
-from drf_spectacular.utils import extend_schema, OpenApiParameter, OpenApiExample
+from drf_spectacular.utils import extend_schema, OpenApiParameter, OpenApiExample, extend_schema_view
 from drf_spectacular.openapi import OpenApiTypes
 from .models import UserProfile
 from .serializers import (
@@ -18,16 +18,87 @@ from .serializers import (
 User = get_user_model()
 
 
-@extend_schema(tags=['Users'])
+@extend_schema_view(
+    list=extend_schema(
+        summary="List all users",
+        description="Retrieve a list of all users (admin only)",
+        tags=['Users'],
+        responses={
+            200: UserSerializer(many=True),
+            403: OpenApiExample(
+                'Forbidden',
+                value={'error': 'Permission denied'},
+                response_only=True
+            )
+        }
+    ),
+    retrieve=extend_schema(
+        summary="Get user details",
+        description="Retrieve detailed information about a specific user",
+        tags=['Users'],
+        responses={
+            200: UserSerializer,
+            404: OpenApiExample(
+                'User Not Found',
+                value={'error': 'User not found'},
+                response_only=True
+            )
+        }
+    ),
+    create=extend_schema(
+        summary="Create new user",
+        description="Create a new user account",
+        tags=['Users'],
+        request=UserSerializer,
+        responses={
+            201: UserSerializer,
+            400: OpenApiExample(
+                'Validation Error',
+                value={'email': ['This field is required.']},
+                response_only=True
+            )
+        }
+    ),
+    update=extend_schema(
+        summary="Update user",
+        description="Update user information",
+        tags=['Users'],
+        request=UserSerializer,
+        responses={
+            200: UserSerializer,
+            400: OpenApiExample(
+                'Validation Error',
+                value={'email': ['Enter a valid email address.']},
+                response_only=True
+            )
+        }
+    ),
+    destroy=extend_schema(
+        summary="Delete user",
+        description="Delete a user account",
+        tags=['Users'],
+        responses={
+            204: None,
+            404: OpenApiExample(
+                'User Not Found',
+                value={'error': 'User not found'},
+                response_only=True
+            )
+        }
+    )
+)
 class UserViewSet(viewsets.ModelViewSet):
     """
-    ViewSet for managing users.
+    ViewSet for comprehensive user management.
     
-    Provides CRUD operations for user management including:
+    Provides full CRUD operations for user accounts including:
     - List all users (admin only)
     - Retrieve user details
+    - Create new user accounts
     - Update user information
-    - Delete user account
+    - Delete user accounts
+    
+    Authentication is required for all endpoints except user creation.
     """
     queryset = User.objects.all()
     serializer_class = UserSerializer
@@ -35,7 +106,10 @@ class UserViewSet(viewsets.ModelViewSet):
     
     def get_permissions(self):
         """
-        Instantiates and returns the list of permissions that this view requires.
+        Apply different permissions based on the action.
+        
+        - create: Allow anyone to register
+        - other actions: Require authentication
         """
         if self.action == 'create':
             permission_classes = [permissions.AllowAny]
@@ -44,16 +118,88 @@ class UserViewSet(viewsets.ModelViewSet):
         return [permission() for permission in permission_classes]
 
 
-@extend_schema(tags=['User Profiles'])
+@extend_schema_view(
+    list=extend_schema(
+        summary="List user profiles",
+        description="Get all user profiles (current user only)",
+        tags=['User Profiles'],
+        responses={
+            200: UserProfileSerializer(many=True),
+            401: OpenApiExample(
+                'Unauthorized',
+                value={'error': 'Authentication required'},
+                response_only=True
+            )
+        }
+    ),
+    retrieve=extend_schema(
+        summary="Get user profile",
+        description="Retrieve the current user's detailed profile information",
+        tags=['User Profiles'],
+        responses={
+            200: UserProfileSerializer,
+            404: OpenApiExample(
+                'Profile Not Found',
+                value={'error': 'Profile not found for current user'},
+                response_only=True
+            )
+        }
+    ),
+    create=extend_schema(
+        summary="Create user profile",
+        description="Create a new user profile",
+        tags=['User Profiles'],
+        request=UserProfileSerializer,
+        responses={
+            201: UserProfileSerializer,
+            400: OpenApiExample(
+                'Validation Error',
+                value={'bio': ['This field may not be blank.']},
+                response_only=True
+            )
+        }
+    ),
+    update=extend_schema(
+        summary="Update user profile",
+        description="Update the current user's profile information",
+        tags=['User Profiles'],
+        request=UserProfileSerializer,
+        responses={
+            200: UserProfileSerializer,
+            400: OpenApiExample(
+                'Validation Error',
+                value={'experience_level': ['Invalid choice.']},
+                response_only=True
+            )
+        }
+    ),
+    partial_update=extend_schema(
+        summary="Partially update user profile",
+        description="Update specific fields of the current user's profile",
+        tags=['User Profiles'],
+        request=UserProfileSerializer,
+        responses={
+            200: UserProfileSerializer,
+            400: OpenApiExample(
+                'Validation Error',
+                value={'desired_salary_min': ['Must be a positive number.']},
+                response_only=True
+            )
+        }
+    )
+)
 class UserProfileViewSet(viewsets.ModelViewSet):
     """
-    ViewSet for managing user profiles.
+    ViewSet for comprehensive user profile management.
     
-    Handles user profile data including:
-    - Personal information
-    - Job preferences
-    - Skills and experience
-    - Availability status
+    Handles all aspects of user profile data including:
+    - Personal information (bio, contact details)
+    - Professional information (skills, experience level)
+    - Job preferences (salary range, work type)
+    - Availability status and preferences
+    - Social media and portfolio links
+    
+    All operations are scoped to the authenticated user's profile only.
     """
     queryset = UserProfile.objects.all()
     serializer_class = UserProfileSerializer
@@ -61,7 +207,9 @@ class UserProfileViewSet(viewsets.ModelViewSet):
     
     def get_queryset(self):
         """
-        This view should return the profile for the currently authenticated user.
+        Filter profiles to only return the current user's profile.
+        
+        This ensures users can only access and modify their own profile data.
         """
         return UserProfile.objects.filter(user=self.request.user)
 
@@ -95,19 +243,63 @@ class UserProfileViewSet(viewsets.ModelViewSet):
         return super().update(request, *args, **kwargs)
 
 
-@extend_schema(tags=['Authentication'])
+@extend_schema(
+    summary="Register new user",
+    description="Create a new user account with email and password. Returns JWT tokens for immediate authentication.",
+    tags=['Authentication'],
+    request=OpenApiExample(
+        'Registration Request',
+        summary='User registration data',
+        description='Required information for creating a new user account',
+        value={
+            "email": "user@example.com",
+            "password": "securePassword123!",
+            "first_name": "John",
+            "last_name": "Doe"
+        }
+    ),
+    responses={
+        201: OpenApiExample(
+            'Registration Success',
+            summary='Successful registration response',
+            description='User created successfully with JWT tokens',
+            value={
+                "message": "User registered successfully",
+                "user_id": 1,
+                "access": "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9...",
+                "refresh": "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9..."
+            }
+        ),
+        400: OpenApiExample(
+            'Registration Error',
+            summary='Registration failed',
+            description='Validation errors or user already exists',
+            value={
+                "error": "User with this email already exists"
+            }
+        )
+    }
+)
 class RegisterView(APIView):
     """
-    User registration endpoint.
+    User registration endpoint for creating new accounts.
     
-    Creates a new user account with email and password.
-    Returns JWT tokens for immediate authentication.
+    Creates a new user account with email and password validation.
+    Automatically generates JWT tokens for immediate authentication.
+    
+    Features:
+    - Email uniqueness validation
+    - Password strength validation
+    - Automatic JWT token generation
+    - Optional first and last name
     """
     permission_classes = [permissions.AllowAny]
     
     def post(self, request):
         """
-        Register a new user.
+        Register a new user with email and password.
+        
+        Validates input data, creates user account, and returns JWT tokens.
         """
         # TODO: Implement proper serializer-based registration
         email = request.data.get('email')
@@ -151,15 +343,53 @@ class RegisterView(APIView):
         }, status=status.HTTP_201_CREATED)
 
 
+@extend_schema(
+    summary="User logout",
+    description="Logout user by blacklisting refresh token and clearing session",
+    tags=['Authentication'],
+    request=OpenApiExample(
+        'Logout Request',
+        summary='Logout request with refresh token',
+        description='Refresh token to be blacklisted',
+        value={
+            "refresh": "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9..."
+        }
+    ),
+    responses={
+        200: OpenApiExample(
+            'Logout Success',
+            summary='Successful logout',
+            description='User logged out successfully',
+            value={
+                "message": "Successfully logged out"
+            }
+        ),
+        400: OpenApiExample(
+            'Logout Error',
+            summary='Invalid token',
+            description='Refresh token is invalid or already blacklisted',
+            value={
+                "error": "Invalid token"
+            }
+        )
+    }
+)
 class LogoutView(APIView):
     """
-    View for user logout.
+    User logout endpoint with token blacklisting.
+    
+    Securely logs out users by:
+    - Blacklisting the provided refresh token
+    - Clearing the user session
+    - Preventing token reuse
     """
     permission_classes = [permissions.IsAuthenticated]
     
     def post(self, request):
         """
         Logout user by blacklisting refresh token.
+        
+        Accepts refresh token and adds it to blacklist to prevent reuse.
         """
         try:
             refresh_token = request.data.get('refresh')
@@ -176,15 +406,46 @@ class LogoutView(APIView):
             )
 
 
+@extend_schema(
+    summary="Get current user",
+    description="Retrieve information about the currently authenticated user",
+    tags=['Authentication'],
+    responses={
+        200: OpenApiExample(
+            'Current User',
+            summary='Current user information',
+            description='Basic information about the authenticated user',
+            value={
+                "id": 1,
+                "username": "user@example.com", 
+                "email": "user@example.com",
+                "first_name": "John",
+                "last_name": "Doe",
+                "date_joined": "2025-06-15T10:00:00Z"
+            }
+        ),
+        401: OpenApiExample(
+            'Unauthorized',
+            summary='Authentication required',
+            description='User must be authenticated to access this endpoint',
+            value={
+                "error": "Authentication credentials were not provided"
+            }
+        )
+    }
+)
 class CurrentUserView(APIView):
     """
-    View to get current user information.
+    Get current authenticated user information.
+    
+    Returns basic user information for the currently authenticated user.
+    Useful for frontend applications to display user data and verify authentication status.
     """
     permission_classes = [permissions.IsAuthenticated]
     
     def get(self, request):
         """
-        Get current user data.
+        Get current user data including basic profile information.
         """
         user = request.user
         return Response({
@@ -197,15 +458,52 @@ class CurrentUserView(APIView):
         })
 
 
+@extend_schema(
+    summary="Change password",
+    description="Change the current user's password with old password verification",
+    tags=['Authentication'],
+    request=OpenApiExample(
+        'Change Password Request',
+        summary='Password change data',
+        description='Old and new passwords for authentication',
+        value={
+            "old_password": "currentPassword123!",
+            "new_password": "newSecurePassword456!"
+        }
+    ),
+    responses={
+        200: OpenApiExample(
+            'Password Changed',
+            summary='Password successfully changed',
+            description='User password updated successfully',
+            value={
+                "message": "Password changed successfully"
+            }
+        ),
+        400: OpenApiExample(
+            'Change Password Error',
+            summary='Password change failed',
+            description='Old password incorrect or new password invalid',
+            value={
+                "error": "Old password is incorrect"
+            }
+        )
+    }
+)
 class ChangePasswordView(APIView):
     """
-    View for changing user password.
+    Change user password with verification.
+    
+    Securely changes user password by:
+    - Verifying the old password
+    - Validating the new password strength
+    - Updating the user's password hash
     """
     permission_classes = [permissions.IsAuthenticated]
     
     def post(self, request):
         """
-        Change user password.
+        Change user password after verifying old password.
         """
         old_password = request.data.get('old_password')
         new_password = request.data.get('new_password')
@@ -234,15 +532,96 @@ class ChangePasswordView(APIView):
         return Response({'message': 'Password changed successfully'})
 
 
+@extend_schema_view(
+    get=extend_schema(
+        summary="Get user profile",
+        description="Retrieve the current user's complete profile information",
+        tags=['User Profiles'],
+        responses={
+            200: OpenApiExample(
+                'User Profile',
+                summary='Complete user profile data',
+                description='All profile information for the current user',
+                value={
+                    "bio": "Experienced Python developer with 5+ years in web development",
+                    "phone_number": "+1-555-123-4567",
+                    "location": "San Francisco, CA",
+                    "website": "https://johndoe.dev",
+                    "linkedin_url": "https://linkedin.com/in/johndoe",
+                    "github_url": "https://github.com/johndoe", 
+                    "resume_url": "https://example.com/resume.pdf",
+                    "skills": ["Python", "Django", "JavaScript", "React"],
+                    "experience_level": "senior",
+                    "desired_salary_min": 120000,
+                    "desired_salary_max": 160000,
+                    "job_preferences": {"remote": True, "full_time": True},
+                    "availability": "immediately",
+                    "is_available": True,
+                    "preferred_work_type": "remote"
+                }
+            ),
+            404: OpenApiExample(
+                'Profile Not Found',
+                summary='Profile does not exist',
+                description='User profile has not been created yet',
+                value={
+                    "error": "Profile not found"
+                }
+            )
+        }
+    ),
+    put=extend_schema(
+        summary="Update user profile",
+        description="Update the current user's profile information",
+        tags=['User Profiles'],
+        request=OpenApiExample(
+            'Profile Update Request',
+            summary='Profile update data',
+            description='Profile fields to update',
+            value={
+                "bio": "Updated bio information",
+                "location": "New York, NY",
+                "skills": ["Python", "Django", "PostgreSQL", "AWS"],
+                "experience_level": "senior",
+                "desired_salary_min": 130000,
+                "desired_salary_max": 170000,
+                "is_available": True
+            }
+        ),
+        responses={
+            200: OpenApiExample(
+                'Profile Updated',
+                summary='Profile successfully updated',
+                description='User profile information updated',
+                value={
+                    "message": "Profile updated successfully"
+                }
+            ),
+            400: OpenApiExample(
+                'Profile Update Error',
+                summary='Profile update failed',
+                description='Validation error or invalid data',
+                value={
+                    "error": "Invalid experience level"
+                }
+            )
+        }
+    )
+)
 class ProfileView(APIView):
     """
-    View for user profile management.
+    Legacy user profile management endpoint.
+    
+    Provides direct access to user profile data with custom serialization.
+    
+    Note: Consider using UserProfileViewSet for full CRUD operations.
+    This view provides simplified profile access for backward compatibility.
     """
     permission_classes = [permissions.IsAuthenticated]
     
     def get(self, request):
         """
-        Get user profile.
+        Get complete user profile information.
         """
         try:
             profile = request.user.profile
@@ -271,7 +650,7 @@ class ProfileView(APIView):
     
     def put(self, request):
         """
-        Update user profile.
+        Update user profile with flexible field updates.
         """
         try:
             profile, created = UserProfile.objects.get_or_create(user=request.user)
