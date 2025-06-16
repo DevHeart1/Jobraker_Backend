@@ -31,23 +31,26 @@ class UserAdmin(BaseUserAdmin):
 @admin.register(UserProfile)
 class UserProfileAdmin(admin.ModelAdmin):
     """Admin configuration for UserProfile model."""
-    list_display = ('user', 'experience_level', 'is_available', 'preferred_work_type', 'location')
-    list_filter = ('experience_level', 'is_available', 'preferred_work_type', 'availability')
-    search_fields = ('user__email', 'user__first_name', 'user__last_name', 'location')
+    list_display = ('user', 'current_title', 'experience_level', 'remote_ok', 'location')
+    list_filter = ('experience_level', 'remote_ok', 'auto_apply_enabled')
+    search_fields = ('user__email', 'user__first_name', 'user__last_name', 'current_title', 'current_company', 'location')
     ordering = ('-created_at',)
     
     fieldsets = (
         ('Basic Information', {
-            'fields': ('user', 'bio', 'phone_number', 'location', 'website')
+            'fields': ('user', 'phone', 'location', 'linkedin_url', 'github_url', 'portfolio_url')
         }),
-        ('Professional Links', {
-            'fields': ('linkedin_url', 'github_url', 'resume_url')
+        ('Professional Information', {
+            'fields': ('current_title', 'current_company', 'experience_level', 'skills', 'industries')
         }),
-        ('Skills & Experience', {
-            'fields': ('skills', 'experience_level', 'job_preferences')
+        ('Job Search Preferences', {
+            'fields': ('preferred_locations', 'job_types', 'salary_min', 'salary_max', 'remote_ok')
         }),
-        ('Salary & Availability', {
-            'fields': ('desired_salary_min', 'desired_salary_max', 'availability', 'is_available', 'preferred_work_type')
+        ('Documents', {
+            'fields': ('resume', 'cover_letter_template')
+        }),
+        ('AI & Automation', {
+            'fields': ('auto_apply_enabled', 'auto_apply_limit_daily', 'match_threshold')
         }),
         ('Timestamps', {
             'fields': ('created_at', 'updated_at'),
