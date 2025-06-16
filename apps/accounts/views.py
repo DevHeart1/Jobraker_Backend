@@ -7,16 +7,30 @@ from django.contrib.auth import get_user_model, logout
 from django.contrib.auth.password_validation import validate_password
 from django.core.exceptions import ValidationError
 from rest_framework_simplejwt.tokens import RefreshToken
+from drf_spectacular.utils import extend_schema, OpenApiParameter, OpenApiExample
+from drf_spectacular.openapi import OpenApiTypes
 from .models import UserProfile
+from .serializers import (
+    UserSerializer, UserProfileSerializer, RegisterSerializer, 
+    ChangePasswordSerializer
+)
 
 User = get_user_model()
 
 
+@extend_schema(tags=['Users'])
 class UserViewSet(viewsets.ModelViewSet):
     """
     ViewSet for managing users.
+    
+    Provides CRUD operations for user management including:
+    - List all users (admin only)
+    - Retrieve user details
+    - Update user information
+    - Delete user account
     """
     queryset = User.objects.all()
+    serializer_class = UserSerializer
     permission_classes = [permissions.IsAuthenticated]
     
     def get_permissions(self):
@@ -30,11 +44,19 @@ class UserViewSet(viewsets.ModelViewSet):
         return [permission() for permission in permission_classes]
 
 
+@extend_schema(tags=['User Profiles'])
 class UserProfileViewSet(viewsets.ModelViewSet):
     """
     ViewSet for managing user profiles.
+    
+    Handles user profile data including:
+    - Personal information
+    - Job preferences
+    - Skills and experience
+    - Availability status
     """
     queryset = UserProfile.objects.all()
+    serializer_class = UserProfileSerializer
     permission_classes = [permissions.IsAuthenticated]
     
     def get_queryset(self):
@@ -43,10 +65,43 @@ class UserProfileViewSet(viewsets.ModelViewSet):
         """
         return UserProfile.objects.filter(user=self.request.user)
 
+    @extend_schema(
+        description="Retrieve the current user's profile",
+        responses={
+            200: UserProfileSerializer,
+            404: OpenApiExample(
+                'Profile Not Found',
+                value={'error': 'Profile not found for current user'},
+                response_only=True
+            )
+        }
+    )
+    def retrieve(self, request, *args, **kwargs):
+        return super().retrieve(request, *args, **kwargs)
 
+    @extend_schema(
+        description="Update the current user's profile",
+        request=UserProfileSerializer,
+        responses={
+            200: UserProfileSerializer,
+            400: OpenApiExample(
+                'Validation Error',
+                value={'field': ['This field is required.']},
+                response_only=True
+            )
+        }
+    )
+    def update(self, request, *args, **kwargs):
+        return super().update(request, *args, **kwargs)
+
+
+@extend_schema(tags=['Authentication'])
 class RegisterView(APIView):
     """
-    View for user registration.
+    User registration endpoint.
+    
+    Creates a new user account with email and password.
+    Returns JWT tokens for immediate authentication.
     """
     permission_classes = [permissions.AllowAny]
     
