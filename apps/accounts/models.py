@@ -30,7 +30,7 @@ class User(AbstractUser):
     REQUIRED_FIELDS = ['first_name', 'last_name']
     
     class Meta:
-        db_table = 'auth_user'
+        db_table = 'users'
         verbose_name = 'User'
         verbose_name_plural = 'Users'
     
