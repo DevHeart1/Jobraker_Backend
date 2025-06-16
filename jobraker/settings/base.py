@@ -95,8 +95,12 @@ DATABASES = {
 # Parse database URL if provided
 DATABASE_URL = os.getenv('DATABASE_URL')
 if DATABASE_URL:
-    import dj_database_url
-    DATABASES['default'] = dj_database_url.parse(DATABASE_URL)
+    try:
+        import dj_database_url
+        DATABASES['default'] = dj_database_url.parse(DATABASE_URL)
+    except ImportError:
+        # dj_database_url not installed, use manual parsing
+        pass
 
 # Password validation
 AUTH_PASSWORD_VALIDATORS = [

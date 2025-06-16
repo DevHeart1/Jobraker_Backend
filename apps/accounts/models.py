@@ -5,8 +5,16 @@ User authentication and profile models for Jobraker.
 from django.contrib.auth.models import AbstractUser
 from django.db import models
 from django.core.validators import validate_email
-from pgvector.django import VectorField
 import uuid
+
+# Handle pgvector import gracefully
+try:
+    from pgvector.django import VectorField
+    PGVECTOR_AVAILABLE = True
+except ImportError:
+    # Fallback for development without pgvector
+    VectorField = None
+    PGVECTOR_AVAILABLE = False
 
 
 class User(AbstractUser):
@@ -82,8 +90,13 @@ class UserProfile(models.Model):
     match_threshold = models.FloatField(default=0.7, help_text="Minimum match score for auto-apply")
     
     # Vector embeddings for semantic matching
-    profile_embedding = VectorField(dimensions=1536, null=True, blank=True)
-    skills_embedding = VectorField(dimensions=1536, null=True, blank=True)
+    if PGVECTOR_AVAILABLE:
+        profile_embedding = VectorField(dimensions=1536, null=True, blank=True)
+        skills_embedding = VectorField(dimensions=1536, null=True, blank=True)
+    else:
+        # Fallback to TextField for development
+        profile_embedding = models.TextField(null=True, blank=True, help_text="Vector embedding (JSON)")
+        skills_embedding = models.TextField(null=True, blank=True, help_text="Vector embedding (JSON)")
     
     # Metadata
     created_at = models.DateTimeField(auto_now_add=True)

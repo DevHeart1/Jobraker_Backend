@@ -3,9 +3,15 @@ Production settings for jobraker project.
 """
 
 from .base import *
-import sentry_sdk
-from sentry_sdk.integrations.django import DjangoIntegration
-from sentry_sdk.integrations.celery import CeleryIntegration
+
+# Sentry integration for error tracking
+try:
+    import sentry_sdk
+    from sentry_sdk.integrations.django import DjangoIntegration
+    from sentry_sdk.integrations.celery import CeleryIntegration
+    SENTRY_AVAILABLE = True
+except ImportError:
+    SENTRY_AVAILABLE = False
 
 # Security settings
 DEBUG = False
@@ -53,7 +59,7 @@ STATICFILES_STORAGE = 'whitenoise.storage.CompressedManifestStaticFilesStorage'
 
 # Sentry integration for error tracking
 SENTRY_DSN = os.getenv('SENTRY_DSN')
-if SENTRY_DSN:
+if SENTRY_DSN and SENTRY_AVAILABLE:
     sentry_sdk.init(
         dsn=SENTRY_DSN,
         integrations=[
