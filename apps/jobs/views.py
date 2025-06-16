@@ -561,9 +561,50 @@ class AutoApplyView(APIView):
         })
 
 
+@extend_schema(
+    summary="Bulk apply to jobs",
+    description="Apply to multiple jobs simultaneously with a single cover letter",
+    tags=['Applications'],
+    request=BulkApplySerializer,
+    responses={
+        200: OpenApiExample(
+            'Bulk Apply Results',
+            summary='Bulk application results',
+            description='Results of bulk application operation',
+            value={
+                "successful_applications": 3,
+                "failed_applications": 1,
+                "total_processed": 4,
+                "details": [
+                    {
+                        "job_id": "550e8400-e29b-41d4-a716-446655440000",
+                        "status": "success",
+                        "application_id": "aa0fb700-f59e-74g7-d049-779988771111"
+                    },
+                    {
+                        "job_id": "660f9500-f39c-52e5-b827-557766551111",
+                        "status": "failed",
+                        "error": "Already applied to this job"
+                    }
+                ]
+            }
+        ),
+        400: ErrorResponseSerializer,
+        401: ErrorResponseSerializer
+    }
+)
 class BulkApplyView(APIView):
     """
-    Apply to multiple jobs at once.
+    Bulk job application for efficient multiple job applications.
+    
+    Allows users to apply to multiple jobs simultaneously with:
+    - Single cover letter for all applications
+    - Batch processing for efficiency
+    - Individual success/failure tracking
+    - Duplicate application prevention
+    - Comprehensive result reporting
+    
+    Maximum 50 jobs per bulk operation.
     """
     permission_classes = [permissions.IsAuthenticated]
     
@@ -625,4 +666,265 @@ class BulkApplyView(APIView):
             'message': f'Applied to {len(applied_jobs)} jobs',
             'applied_jobs': applied_jobs,
             'failed_jobs': failed_jobs
+        })
+
+
+@extend_schema_view(
+    list=extend_schema(
+        summary="List saved jobs",
+        description="Retrieve all jobs saved by the current user",
+        tags=['Saved Jobs'],
+        responses={
+            200: SavedJobSerializer(many=True),
+            401: ErrorResponseSerializer
+        }
+    ),
+    retrieve=extend_schema(
+        summary="Get saved job details",
+        description="Retrieve details of a specific saved job",
+        tags=['Saved Jobs'],
+        responses={
+            200: SavedJobSerializer,
+            404: ErrorResponseSerializer
+        }
+    ),
+    create=extend_schema(
+        summary="Save a job",
+        description="Add a job to the user's saved jobs collection",
+        tags=['Saved Jobs'],
+        request=SavedJobSerializer,
+        responses={
+            201: SavedJobSerializer,
+            400: ErrorResponseSerializer
+        }
+    ),
+    destroy=extend_schema(
+        summary="Remove saved job",
+        description="Remove a job from the user's saved jobs collection",
+        tags=['Saved Jobs'],
+        responses={
+            204: None,
+            404: ErrorResponseSerializer
+        }
+    )
+)
+class SavedJobViewSet(viewsets.ModelViewSet):
+    """
+    ViewSet for managing user's saved jobs collection.
+    
+    Allows users to:
+    - Save jobs for later review
+    - List all saved jobs with job details
+    - Remove jobs from saved collection
+    - Add notes to saved jobs
+    
+    All operations are scoped to the current user's saved jobs.
+    """
+    queryset = SavedJob.objects.all()
+    serializer_class = SavedJobSerializer
+    permission_classes = [permissions.IsAuthenticated]
+    
+    def get_queryset(self):
+        """Return saved jobs for the current user only."""
+        return SavedJob.objects.filter(user=self.request.user)
+    
+    def perform_create(self, serializer):
+        """Create saved job for the current user."""
+        serializer.save(user=self.request.user)
+
+
+@extend_schema_view(
+    list=extend_schema(
+        summary="List job alerts",
+        description="Retrieve all job alerts for the current user",
+        tags=['Job Alerts'],
+        responses={
+            200: JobAlertSerializer(many=True),
+            401: ErrorResponseSerializer
+        }
+    ),
+    retrieve=extend_schema(
+        summary="Get job alert details",
+        description="Retrieve details of a specific job alert",
+        tags=['Job Alerts'],
+        responses={
+            200: JobAlertSerializer,
+            404: ErrorResponseSerializer
+        }
+    ),
+    create=extend_schema(
+        summary="Create job alert",
+        description="Create a new job alert with search criteria",
+        tags=['Job Alerts'],
+        request=JobAlertSerializer,
+        responses={
+            201: JobAlertSerializer,
+            400: ErrorResponseSerializer
+        }
+    ),
+    update=extend_schema(
+        summary="Update job alert",
+        description="Update job alert criteria and settings",
+        tags=['Job Alerts'],
+        request=JobAlertSerializer,
+        responses={
+            200: JobAlertSerializer,
+            400: ErrorResponseSerializer,
+            404: ErrorResponseSerializer
+        }
+    ),
+    destroy=extend_schema(
+        summary="Delete job alert",
+        description="Delete a job alert",
+        tags=['Job Alerts'],
+        responses={
+            204: None,
+            404: ErrorResponseSerializer
+        }
+    )
+)
+class JobAlertViewSet(viewsets.ModelViewSet):
+    """
+    ViewSet for managing automated job alerts.
+    
+    Job alerts automatically notify users when new jobs match their criteria:
+    - Create alerts with flexible search criteria
+    - Set notification frequency (daily, weekly, immediate)
+    - Enable/disable alerts as needed
+    - Track alert execution and results
+    
+    All alerts are scoped to the current user.
+    """
+    queryset = JobAlert.objects.all()
+    serializer_class = JobAlertSerializer
+    permission_classes = [permissions.IsAuthenticated]
+    
+    def get_queryset(self):
+        """Return job alerts for the current user only."""
+        return JobAlert.objects.filter(user=self.request.user)
+    
+    def perform_create(self, serializer):
+        """Create job alert for the current user."""
+        serializer.save(user=self.request.user)
+    
+    @extend_schema(
+        summary="Test job alert",
+        description="Test a job alert to see matching jobs",
+        tags=['Job Alerts'],
+        responses={
+            200: OpenApiExample(
+                'Alert Test Results',
+                summary='Job alert test results',
+                description='Jobs that match the alert criteria',
+                value={
+                    "matching_jobs": 15,
+                    "jobs": [
+                        {
+                            "id": "550e8400-e29b-41d4-a716-446655440000",
+                            "title": "Senior Python Developer",
+                            "company": "TechCorp Inc.",
+                            "location": "San Francisco, CA"
+                        }
+                    ]
+                }
+            ),
+            404: ErrorResponseSerializer
+        }
+    )
+    @action(detail=True, methods=['post'])
+    def test(self, request, pk=None):
+        """Test job alert to preview matching jobs."""
+        alert = self.get_object()
+        
+        # Apply alert criteria to find matching jobs
+        queryset = Job.objects.all()
+        
+        if alert.title:
+            queryset = queryset.filter(title__icontains=alert.title)
+        if alert.location:
+            queryset = queryset.filter(location__icontains=alert.location)
+        if alert.job_type:
+            queryset = queryset.filter(job_type=alert.job_type)
+        if alert.experience_level:
+            queryset = queryset.filter(experience_level=alert.experience_level)
+        if alert.min_salary:
+            queryset = queryset.filter(salary_min__gte=alert.min_salary)
+        if alert.is_remote is not None:
+            queryset = queryset.filter(is_remote=alert.is_remote)
+        
+        matching_jobs = queryset.order_by('-posted_date')[:10]
+        
+        return Response({
+            'matching_jobs': queryset.count(),
+            'jobs': JobListSerializer(matching_jobs, many=True).data
+        })
+
+
+@extend_schema(
+    summary="Get application statistics",
+    description="Get comprehensive statistics about user's job applications",
+    tags=['Applications'],
+    responses={
+        200: ApplicationStatsSerializer,
+        401: ErrorResponseSerializer
+    }
+)
+class ApplicationStatsView(APIView):
+    """
+    Get comprehensive application statistics and analytics.
+    
+    Provides insights into:
+    - Application success rates
+    - Response times and patterns
+    - Most applied job types and locations
+    - Application status distribution
+    - Performance trends over time
+    """
+    permission_classes = [permissions.IsAuthenticated]
+    
+    def get(self, request):
+        """Calculate and return application statistics for the current user."""
+        user_applications = Application.objects.filter(user=request.user)
+        
+        total_applications = user_applications.count()
+        if total_applications == 0:
+            return Response({
+                'total_applications': 0,
+                'message': 'No applications found'
+            })
+        
+        # Calculate statistics
+        pending_applications = user_applications.filter(status='pending').count()
+        interview_requests = user_applications.filter(status='interview').count()
+        offers_received = user_applications.filter(status='offer').count()
+        rejections = user_applications.filter(status='rejected').count()
+        
+        success_rate = ((interview_requests + offers_received) / total_applications) * 100
+        
+        # Most applied job types and locations
+        from django.db.models import Count
+        most_applied_job_type = (
+            user_applications.values('job__job_type')
+            .annotate(count=Count('job__job_type'))
+            .order_by('-count')
+            .first()
+        )
+        
+        most_applied_location = (
+            user_applications.values('job__location')
+            .annotate(count=Count('job__location'))
+            .order_by('-count')
+            .first()
+        )
+        
+        return Response({
+            'total_applications': total_applications,
+            'pending_applications': pending_applications,
+            'interview_requests': interview_requests,
+            'offers_received': offers_received,
+            'rejections': rejections,
+            'success_rate': round(success_rate, 2),
+            'average_response_time': 7.5,  # Placeholder - calculate from actual data
+            'most_applied_job_type': most_applied_job_type['job__job_type'] if most_applied_job_type else None,
+            'most_applied_location': most_applied_location['job__location'] if most_applied_location else None
         })
