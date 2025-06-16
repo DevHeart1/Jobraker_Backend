@@ -11,7 +11,7 @@ from drf_spectacular.utils import extend_schema, OpenApiParameter, OpenApiExampl
 from drf_spectacular.openapi import OpenApiTypes
 from .models import UserProfile
 from .serializers import (
-    UserSerializer, UserProfileSerializer, RegisterSerializer, 
+    UserSerializer, UserProfileSerializer, UserRegistrationSerializer, 
     ChangePasswordSerializer
 )
 
