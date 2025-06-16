@@ -7,7 +7,11 @@ django-jazzmin>=2.6.0
 # Database & ORM
 psycopg2-binary>=2.9.5
 django-extensions>=3.2.0
-pgvector>=0.2.0
+dj-database-url>=3.0.0
+
+# Environment & Configuration
+python-decouple>=3.8
+python-dotenv>=1.0.0
 
 # Caching & Session Storage
 redis>=4.5.0
