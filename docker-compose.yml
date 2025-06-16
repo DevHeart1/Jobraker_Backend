@@ -1,0 +1,87 @@
+version: '3.8'
+
+services:
+  db:
+    image: pgvector/pgvector:pg15
+    environment:
+      POSTGRES_DB: jobraker_db
+      POSTGRES_USER: jobraker_user
+      POSTGRES_PASSWORD: jobraker_pass
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./docker/postgres/init.sql:/docker-entrypoint-initdb.d/init.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U jobraker_user -d jobraker_db"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  web:
+    build: .
+    command: python manage.py runserver 0.0.0.0:8000
+    volumes:
+      - .:/app
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      - DATABASE_URL=postgresql://jobraker_user:jobraker_pass@db:5432/jobraker_db
+      - REDIS_URL=redis://redis:6379/0
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/0
+
+  celery:
+    build: .
+    command: celery -A jobraker worker --loglevel=info
+    volumes:
+      - .:/app
+    env_file:
+      - .env
+    depends_on:
+      - db
+      - redis
+    environment:
+      - DATABASE_URL=postgresql://jobraker_user:jobraker_pass@db:5432/jobraker_db
+      - REDIS_URL=redis://redis:6379/0
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/0
+
+  celery-beat:
+    build: .
+    command: celery -A jobraker beat --loglevel=info --scheduler django_celery_beat.schedulers:DatabaseScheduler
+    volumes:
+      - .:/app
+    env_file:
+      - .env
+    depends_on:
+      - db
+      - redis
+    environment:
+      - DATABASE_URL=postgresql://jobraker_user:jobraker_pass@db:5432/jobraker_db
+      - REDIS_URL=redis://redis:6379/0
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/0
+
+volumes:
+  postgres_data:
+  redis_data:

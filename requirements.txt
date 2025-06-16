@@ -1,0 +1,71 @@
+# Core Django Framework
+Django>=4.2.0,<5.0.0
+djangorestframework>=3.14.0
+django-cors-headers>=4.0.0
+django-jazzmin>=2.6.0
+
+# Database & ORM
+psycopg2-binary>=2.9.5
+django-extensions>=3.2.0
+pgvector>=0.2.0
+
+# Caching & Session Storage
+redis>=4.5.0
+django-redis>=5.2.0
+
+# Asynchronous Task Processing
+celery>=5.3.0
+celery[redis]>=5.3.0
+django-celery-beat>=2.5.0
+django-celery-results>=2.5.0
+
+# Authentication & Security
+djangorestframework-simplejwt>=5.2.0
+django-oauth-toolkit>=2.2.0
+cryptography>=40.0.0
+django-ratelimit>=4.0.0
+
+# API Documentation
+drf-spectacular>=0.26.0
+drf-spectacular[sidecar]>=0.26.0
+
+# External API Integrations
+requests>=2.31.0
+openai>=1.0.0
+httpx>=0.24.0
+
+# Environment & Configuration
+python-decouple>=3.8
+python-dotenv>=1.0.0
+
+# Monitoring & Logging
+sentry-sdk[django]>=1.28.0
+django-prometheus>=2.3.0
+structlog>=23.1.0
+
+# Development & Testing
+pytest>=7.4.0
+pytest-django>=4.5.0
+pytest-cov>=4.1.0
+factory-boy>=3.2.0
+faker>=18.0.0
+
+# Code Quality
+black>=23.0.0
+isort>=5.12.0
+flake8>=6.0.0
+pre-commit>=3.3.0
+
+# Production Server
+gunicorn>=21.0.0
+whitenoise>=6.5.0
+
+# WebSocket Support (Optional)
+channels>=4.0.0
+channels-redis>=4.1.0
+
+# Utilities
+Pillow>=10.0.0
+python-slugify>=8.0.0
+django-phonenumber-field>=7.1.0
+phonenumbers>=8.13.0
