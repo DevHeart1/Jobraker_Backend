@@ -237,3 +237,144 @@ class Application(models.Model):
     
     def __str__(self):
         return f"{self.user.get_full_name()} -> {self.job.title} at {self.job.company}"
+
+
+class SavedJob(models.Model):
+    """Model for jobs saved by users for later reference."""
+    
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='saved_jobs')
+    job = models.ForeignKey(Job, on_delete=models.CASCADE, related_name='saved_by')
+    
+    # Optional categorization
+    category = models.CharField(max_length=50, blank=True, help_text="User-defined category")
+    notes = models.TextField(blank=True, help_text="User notes about this job")
+    
+    # Tracking
+    created_at = models.DateTimeField(auto_now_add=True)
+    
+    class Meta:
+        db_table = 'saved_jobs'
+        verbose_name = 'Saved Job'
+        verbose_name_plural = 'Saved Jobs'
+        unique_together = ['user', 'job']  # Prevent duplicate saves
+        ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['user', '-created_at']),
+        ]
+    
+    def __str__(self):
+        return f"{self.user.get_full_name()} saved {self.job.title}"
+
+
+class JobAlert(models.Model):
+    """Model for job alerts/notifications based on user preferences."""
+    
+    FREQUENCY_CHOICES = [
+        ('immediate', 'Immediate'),
+        ('daily', 'Daily'),
+        ('weekly', 'Weekly'),
+        ('monthly', 'Monthly'),
+    ]
+    
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='job_alerts')
+    
+    # Alert Configuration
+    name = models.CharField(max_length=100, help_text="Alert name for user reference")
+    keywords = models.JSONField(default=list, help_text="Keywords to search for")
+    location = models.CharField(max_length=100, blank=True)
+    job_type = models.CharField(max_length=20, choices=Job.JOB_TYPES, blank=True)
+    experience_level = models.CharField(max_length=20, choices=Job.EXPERIENCE_LEVELS, blank=True)
+    remote_only = models.BooleanField(default=False)
+    
+    # Salary preferences
+    min_salary = models.PositiveIntegerField(null=True, blank=True)
+    max_salary = models.PositiveIntegerField(null=True, blank=True)
+    
+    # Notification settings
+    frequency = models.CharField(max_length=20, choices=FREQUENCY_CHOICES, default='daily')
+    email_notifications = models.BooleanField(default=True)
+    push_notifications = models.BooleanField(default=False)
+    
+    # Status
+    is_active = models.BooleanField(default=True)
+    last_run = models.DateTimeField(null=True, blank=True)
+    
+    # Tracking
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    
+    class Meta:
+        db_table = 'job_alerts'
+        verbose_name = 'Job Alert'
+        verbose_name_plural = 'Job Alerts'
+        ordering = ['-created_at']
+        indexes = [
+            models.Index(fields=['user', 'is_active']),
+            models.Index(fields=['frequency', 'last_run']),
+        ]
+    
+    def __str__(self):
+        return f"{self.user.get_full_name()}: {self.name}"
+
+
+class JobSource(models.Model):
+    """Model to track different job sources and their configurations."""
+    
+    SOURCE_TYPES = [
+        ('api', 'API Integration'),
+        ('scraper', 'Web Scraper'),
+        ('manual', 'Manual Entry'),
+        ('import', 'Data Import'),
+    ]
+    
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    
+    # Source Information
+    name = models.CharField(max_length=100, unique=True)
+    source_type = models.CharField(max_length=20, choices=SOURCE_TYPES)
+    base_url = models.URLField(blank=True)
+    api_endpoint = models.URLField(blank=True)
+    
+    # Configuration
+    is_active = models.BooleanField(default=True)
+    configuration = models.JSONField(default=dict, help_text="Source-specific configuration")
+    
+    # API credentials (encrypted)
+    api_key = models.CharField(max_length=200, blank=True)
+    api_secret = models.CharField(max_length=200, blank=True)
+    
+    # Rate limiting
+    rate_limit_per_hour = models.PositiveIntegerField(default=1000)
+    rate_limit_per_day = models.PositiveIntegerField(default=10000)
+    
+    # Tracking
+    last_sync_at = models.DateTimeField(null=True, blank=True)
+    total_jobs_fetched = models.PositiveIntegerField(default=0)
+    successful_syncs = models.PositiveIntegerField(default=0)
+    failed_syncs = models.PositiveIntegerField(default=0)
+    
+    # Timestamps
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    
+    class Meta:
+        db_table = 'job_sources'
+        verbose_name = 'Job Source'
+        verbose_name_plural = 'Job Sources'
+        ordering = ['name']
+    
+    def __str__(self):
+        return f"{self.name} ({self.source_type})"
+    
+    def update_sync_stats(self, success=True, jobs_count=0):
+        """Update synchronization statistics."""
+        if success:
+            self.successful_syncs += 1
+            self.total_jobs_fetched += jobs_count
+        else:
+            self.failed_syncs += 1
+        
+        self.last_sync_at = timezone.now()
+        self.save(update_fields=['successful_syncs', 'failed_syncs', 'total_jobs_fetched', 'last_sync_at'])

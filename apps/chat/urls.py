@@ -8,13 +8,12 @@ from . import views
 
 # Router for ViewSets
 router = DefaultRouter()
-router.register(r'conversations', views.ConversationViewSet, basename='conversation')
-router.register(r'messages', views.MessageViewSet, basename='message')
+router.register(r'sessions', views.ChatSessionViewSet, basename='chatsession')
 
 urlpatterns = [
     # Chat endpoints
-    path('send/', views.SendMessageView.as_view(), name='send_message'),
-    path('ai-reply/', views.AIReplyView.as_view(), name='ai_reply'),
+    path('send/', views.ChatView.as_view(), name='chat'),
+    path('advice/', views.JobAdviceView.as_view(), name='job_advice'),
     
     # Include router URLs
     path('', include(router.urls)),

@@ -4,7 +4,7 @@ from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from django.contrib.auth import get_user_model
-from .models import Job, Application, JobSource, JobAlert, SavedJob
+from .models import Job, Application, SavedJob, JobAlert, JobSource
 
 User = get_user_model()
 

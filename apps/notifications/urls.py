@@ -12,8 +12,7 @@ router.register(r'notifications', views.NotificationViewSet, basename='notificat
 
 urlpatterns = [
     # Notification management
-    path('mark-read/', views.MarkNotificationsReadView.as_view(), name='mark_read'),
-    path('preferences/', views.NotificationPreferencesView.as_view(), name='preferences'),
+    path('settings/', views.NotificationSettingsView.as_view(), name='settings'),
     
     # Include router URLs
     path('', include(router.urls)),
