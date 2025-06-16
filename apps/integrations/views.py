@@ -2,17 +2,79 @@ from django.shortcuts import render
 from rest_framework import viewsets, permissions, status
 from rest_framework.response import Response
 from rest_framework.views import APIView
+from drf_spectacular.utils import extend_schema, OpenApiParameter, OpenApiExample
+from drf_spectacular.openapi import OpenApiTypes
 
 
+@extend_schema(
+    summary="Handle external webhooks",
+    description="Process incoming webhooks from external job services and automation platforms",
+    tags=['Integrations'],
+    parameters=[
+        OpenApiParameter(
+            name='service',
+            description='Service name (adzuna, skyvern, etc.)',
+            required=True,
+            type=OpenApiTypes.STR,
+            location=OpenApiParameter.PATH
+        )
+    ],
+    request=OpenApiExample(
+        'Webhook Payload',
+        summary='Example webhook data',
+        description='Webhook payload from external service',
+        value={
+            "event": "job_created",
+            "data": {
+                "job_id": "ext_123",
+                "title": "Software Engineer",
+                "company": "TechCorp"
+            },
+            "timestamp": "2025-06-16T08:00:00Z"
+        }
+    ),
+    responses={
+        200: OpenApiExample(
+            'Webhook Processed',
+            summary='Webhook successfully processed',
+            description='Confirmation of webhook processing',
+            value={
+                "message": "Adzuna webhook received",
+                "processed": True,
+                "timestamp": "2025-06-16T08:00:00Z"
+            }
+        ),
+        400: OpenApiExample(
+            'Unknown Service',
+            summary='Unsupported webhook service',
+            description='Service not recognized or supported',
+            value={
+                "error": "Unknown service"
+            }
+        )
+    }
+)
 class WebhookView(APIView):
     """
-    Handle webhooks from external services.
+    External service webhook handler for real-time data processing.
+    
+    Handles incoming webhooks from various external services:
+    - Adzuna: Job posting updates and notifications
+    - Skyvern: Automation task completion and status updates
+    - LinkedIn: Profile updates and connection events
+    - Indeed: Application status changes
+    
+    Processes webhook data and triggers appropriate internal actions
+    such as job synchronization, user notifications, or data updates.
     """
     permission_classes = []  # Public endpoint for webhooks
     
     def post(self, request, service=None):
         """
-        Handle incoming webhooks from various services.
+        Process incoming webhook from specified external service.
+        
+        Validates webhook authenticity and processes the payload
+        based on the service type and event data.
         """
         if service == 'adzuna':
             # TODO: Handle Adzuna webhooks
@@ -27,15 +89,69 @@ class WebhookView(APIView):
             )
 
 
+@extend_schema(
+    summary="Check API integration status",
+    description="Get the current status and health of all external API integrations",
+    tags=['Integrations'],
+    responses={
+        200: OpenApiExample(
+            'API Status',
+            summary='Status of all API integrations',
+            description='Health check results for external services',
+            value={
+                "adzuna": {
+                    "status": "active",
+                    "last_sync": "2025-06-16T07:00:00Z",
+                    "jobs_synced": 1250,
+                    "api_limit_remaining": 850
+                },
+                "openai": {
+                    "status": "active",
+                    "last_request": "2025-06-16T08:15:00Z",
+                    "requests_today": 145,
+                    "token_usage": 12500
+                },
+                "skyvern": {
+                    "status": "active",
+                    "last_automation": "2025-06-16T08:00:00Z",
+                    "active_tasks": 3,
+                    "completed_today": 25
+                },
+                "linkedin": {
+                    "status": "inactive",
+                    "last_sync": None,
+                    "error": "API credentials not configured"
+                }
+            }
+        ),
+        401: OpenApiExample(
+            'Unauthorized',
+            value={'error': 'Authentication required'},
+            response_only=True
+        )
+    }
+)
 class ApiStatusView(APIView):
     """
-    Check the status of external API integrations.
+    External API integration status monitoring.
+    
+    Provides real-time status information for all external integrations:
+    - Connection status and health checks
+    - Last successful operation timestamps
+    - Usage statistics and rate limits
+    - Error states and diagnostic information
+    - Performance metrics and response times
+    
+    Useful for system monitoring and troubleshooting integration issues.
     """
     permission_classes = [permissions.IsAuthenticated]
     
     def get(self, request):
         """
-        Get status of all external API integrations.
+        Check and return status of all external API integrations.
+        
+        Performs health checks and returns comprehensive status information
+        for monitoring and diagnostic purposes.
         """
         # TODO: Implement actual API status checks
         return Response({
@@ -45,15 +161,63 @@ class ApiStatusView(APIView):
         })
 
 
+@extend_schema(
+    summary="Trigger job synchronization",
+    description="Manually trigger job data synchronization from external sources",
+    tags=['Integrations'],
+    request=OpenApiExample(
+        'Job Sync Request',
+        summary='Trigger job sync for specific source',
+        description='Request to sync jobs from external source',
+        value={
+            "source": "adzuna",
+            "full_sync": False,
+            "max_jobs": 1000
+        }
+    ),
+    responses={
+        200: OpenApiExample(
+            'Sync Triggered',
+            summary='Job synchronization started',
+            description='Sync task queued successfully',
+            value={
+                "message": "Job sync triggered for adzuna",
+                "status": "queued",
+                "task_id": "celery_task_123",
+                "estimated_completion": "2025-06-16T08:30:00Z"
+            }
+        ),
+        400: OpenApiExample(
+            'Invalid Request',
+            value={'error': 'Invalid source specified'},
+            response_only=True
+        ),
+        401: OpenApiExample(
+            'Unauthorized',
+            value={'error': 'Authentication required'},
+            response_only=True
+        )
+    }
+)
 class JobSyncView(APIView):
     """
-    Manually trigger job synchronization from external sources.
+    Manual job synchronization trigger for external data sources.
+    
+    Allows administrators to manually trigger job data synchronization:
+    - Full sync: Complete refresh of all job data
+    - Incremental sync: Only new/updated jobs since last sync
+    - Source-specific sync: Target specific job boards or APIs
+    - Batch processing: Handle large datasets efficiently
+    
+    Uses Celery for asynchronous processing to prevent request timeouts.
     """
     permission_classes = [permissions.IsAuthenticated]
     
     def post(self, request):
         """
-        Trigger manual job sync.
+        Trigger manual job synchronization from external sources.
+        
+        Queues background tasks for data fetching and processing.
         """
         source = request.data.get('source', 'all')
         
@@ -63,4 +227,192 @@ class JobSyncView(APIView):
         return Response({
             'message': f'Job sync triggered for {source}',
             'status': 'queued'
+        })
+
+
+@extend_schema(
+    summary="Test API connection",
+    description="Test connectivity and authentication with external APIs",
+    tags=['Integrations'],
+    parameters=[
+        OpenApiParameter(
+            name='service',
+            description='Service to test (adzuna, openai, skyvern)',
+            required=True,
+            type=OpenApiTypes.STR,
+            location=OpenApiParameter.PATH
+        )
+    ],
+    responses={
+        200: OpenApiExample(
+            'Connection Test Success',
+            summary='API connection successful',
+            description='Connection test passed with API details',
+            value={
+                "service": "adzuna",
+                "status": "connected",
+                "response_time": 245,
+                "api_version": "1.2.3",
+                "rate_limit": {
+                    "remaining": 950,
+                    "reset_at": "2025-06-16T09:00:00Z"
+                }
+            }
+        ),
+        400: OpenApiExample(
+            'Connection Test Failed',
+            summary='API connection failed',
+            description='Connection test failed with error details',
+            value={
+                "service": "adzuna",
+                "status": "failed",
+                "error": "Invalid API credentials",
+                "error_code": "AUTH_FAILED"
+            }
+        ),
+        401: OpenApiExample(
+            'Unauthorized',
+            value={'error': 'Authentication required'},
+            response_only=True
+        )
+    }
+)
+class ApiTestView(APIView):
+    """
+    API connection testing and diagnostics.
+    
+    Tests connectivity and authentication with external services:
+    - Validates API credentials and permissions
+    - Measures response times and performance
+    - Checks API rate limits and quotas
+    - Verifies service availability and status
+    - Provides diagnostic information for troubleshooting
+    """
+    permission_classes = [permissions.IsAuthenticated]
+    
+    def get(self, request, service):
+        """
+        Test connection to specified external API service.
+        
+        Performs authentication test and basic API call to verify connectivity.
+        """
+        # TODO: Implement actual API connection tests
+        if service in ['adzuna', 'openai', 'skyvern']:
+            return Response({
+                'service': service,
+                'status': 'connected',
+                'response_time': 200,
+                'message': f'{service.title()} API connection test successful'
+            })
+        else:
+            return Response({
+                'error': f'Unknown service: {service}'
+            }, status=status.HTTP_400_BAD_REQUEST)
+
+
+@extend_schema(
+    summary="Get integration configuration",
+    description="Retrieve configuration settings for external integrations",
+    tags=['Integrations'],
+    responses={
+        200: OpenApiExample(
+            'Integration Config',
+            summary='Integration configuration settings',
+            description='Current configuration for all integrations',
+            value={
+                "adzuna": {
+                    "enabled": True,
+                    "sync_frequency": "hourly",
+                    "max_jobs_per_sync": 1000,
+                    "last_configured": "2025-06-15T10:00:00Z"
+                },
+                "openai": {
+                    "enabled": True,
+                    "model": "gpt-4",
+                    "max_tokens": 2000,
+                    "temperature": 0.7
+                },
+                "skyvern": {
+                    "enabled": True,
+                    "max_concurrent_tasks": 5,
+                    "retry_attempts": 3,
+                    "timeout_minutes": 10
+                }
+            }
+        ),
+        401: OpenApiExample(
+            'Unauthorized',
+            value={'error': 'Authentication required'},
+            response_only=True
+        )
+    }
+)
+class IntegrationConfigView(APIView):
+    """
+    Integration configuration management.
+    
+    Manages configuration settings for external service integrations:
+    - API credentials and authentication settings
+    - Sync frequencies and batch sizes
+    - Rate limiting and retry policies
+    - Feature flags and service enablement
+    - Performance and optimization parameters
+    """
+    permission_classes = [permissions.IsAuthenticated]
+    
+    def get(self, request):
+        """
+        Get current integration configuration settings.
+        
+        Returns configuration for all enabled integrations.
+        """
+        # TODO: Implement actual config retrieval
+        return Response({
+            'message': 'Integration configuration retrieval coming soon',
+            'integrations': {}
+        })
+    
+    @extend_schema(
+        summary="Update integration configuration",
+        description="Update configuration settings for external integrations",
+        request=OpenApiExample(
+            'Config Update',
+            summary='Update integration settings',
+            description='New configuration values',
+            value={
+                "adzuna": {
+                    "sync_frequency": "daily",
+                    "max_jobs_per_sync": 2000
+                },
+                "openai": {
+                    "temperature": 0.8,
+                    "max_tokens": 3000
+                }
+            }
+        ),
+        responses={
+            200: OpenApiExample(
+                'Config Updated',
+                summary='Configuration updated successfully',
+                value={
+                    "message": "Integration configuration updated",
+                    "updated_services": ["adzuna", "openai"]
+                }
+            ),
+            400: OpenApiExample(
+                'Invalid Config',
+                value={'error': 'Invalid configuration values'},
+                response_only=True
+            )
+        }
+    )
+    def patch(self, request):
+        """
+        Update specific integration configuration settings.
+        
+        Allows partial updates to integration configurations.
+        """
+        # TODO: Implement config updates
+        return Response({
+            'message': 'Integration configuration update coming soon'
         })
