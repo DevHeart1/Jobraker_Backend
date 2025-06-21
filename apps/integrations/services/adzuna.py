@@ -4,43 +4,154 @@ Adzuna API integration service for job data fetching.
 
 import requests
 import logging
+import time # For circuit breaker
 from typing import Dict, List, Optional, Any
 from datetime import datetime, timedelta
 from django.conf import settings
 from django.utils import timezone
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry # For retry mechanism
+# from django_prometheus.models import ExportModelOperationsMixin # If models were prometheus enabled
+from prometheus_client import Counter, Histogram # Assuming prometheus_client is available
+
 from apps.jobs.models import Job, JobSource
 
 logger = logging.getLogger(__name__)
 
+# --- Prometheus Metrics Definition (conceptual, ideally in a metrics.py) ---
+# These would be defined globally or registered with Django Prometheus
+ADZUNA_API_REQUESTS_TOTAL = Counter(
+    'jobraker_adzuna_api_requests_total',
+    'Total requests made to Adzuna API.',
+    ['endpoint', 'status_code', 'country']
+)
+ADZUNA_API_REQUEST_DURATION_SECONDS = Histogram(
+    'jobraker_adzuna_api_request_duration_seconds',
+    'Latency of Adzuna API calls.',
+    ['endpoint', 'country']
+)
+ADZUNA_JOBS_PROCESSED_TOTAL = Counter( # Renamed from ingested for clarity on what AdzunaJobProcessor tracks
+    'jobraker_adzuna_jobs_processed_total',
+    'Total Adzuna jobs processed by the system.',
+    ['country', 'status'] # status: created, updated, skipped, error
+)
+ADZUNA_API_ERRORS_TOTAL = Counter( # More specific than the generic one in _make_request
+    'jobraker_adzuna_api_errors_total',
+    'Total errors encountered during Adzuna API calls from client perspective.',
+    ['endpoint', 'country', 'error_type']
+)
+ADZUNA_CIRCUIT_BREAKER_STATE_CHANGES_TOTAL = Counter(
+    'jobraker_adzuna_circuit_breaker_state_changes_total',
+    'Total number of Adzuna API circuit breaker state changes.',
+    ['new_state']
+)
+# --- End Prometheus Metrics Definition ---
+
+# Circuit Breaker States
+STATE_CLOSED = "CLOSED"
+STATE_OPEN = "OPEN"
+STATE_HALF_OPEN = "HALF_OPEN"
 
 class AdzunaAPIClient:
     """
     Client for interacting with Adzuna API.
     Handles job fetching, search, and data processing.
+    Includes retry mechanism and basic circuit breaker.
     """
     
     BASE_URL = "https://api.adzuna.com/v1/api"
     
+    # Circuit Breaker Configuration
+    CB_MAX_FAILURES = 5
+    CB_RESET_TIMEOUT_SECONDS = 60  # Time in seconds before trying again when circuit is OPEN
+    CB_HALF_OPEN_MAX_REQUESTS = 3  # Number of requests to allow in HALF_OPEN state
+    REQUEST_DELAY_SECONDS = 0.5  # Proactive delay between requests
+
     def __init__(self):
         self.app_id = getattr(settings, 'ADZUNA_APP_ID', '')
         self.api_key = getattr(settings, 'ADZUNA_API_KEY', '')
-        self.session = requests.Session()
         
+        self.session = self._configure_session()
+
+        # Circuit Breaker State
+        self._cb_state = STATE_CLOSED
+        self._cb_failures = 0
+        self._cb_last_failure_time = None
+        self._cb_half_open_success_count = 0
+
         if not self.app_id or not self.api_key:
-            logger.warning("Adzuna API credentials not configured")
-    
+            logger.warning("Adzuna API credentials not configured. API calls will use mock data.")
+
+    def _configure_session(self) -> requests.Session:
+        """Configures the requests session with retry mechanism."""
+        session = requests.Session()
+        retry_strategy = Retry(
+            total=3,  # Total number of retries
+            status_forcelist=[429, 500, 502, 503, 504],  # HTTP status codes to retry on
+            allowed_methods=["HEAD", "GET", "OPTIONS"], # Allowed methods for retry
+            backoff_factor=1  # Exponential backoff factor (e.g., 1s, 2s, 4s)
+        )
+        adapter = HTTPAdapter(max_retries=retry_strategy)
+        session.mount("https://", adapter)
+        session.mount("http://", adapter)
+        return session
+
+    def _handle_circuit_breaker_open(self):
+        """Logic for when the circuit is OPEN."""
+        if self._cb_last_failure_time and \
+           (time.monotonic() - self._cb_last_failure_time) > self.CB_RESET_TIMEOUT_SECONDS:
+            self._cb_state = STATE_HALF_OPEN
+            self._cb_half_open_success_count = 0 # Reset for HALF_OPEN
+            ADZUNA_CIRCUIT_BREAKER_STATE_CHANGES_TOTAL.labels(new_state=STATE_HALF_OPEN).inc()
+            logger.info("Circuit Breaker: State changed to HALF_OPEN.")
+        else:
+            logger.warning("Circuit Breaker: OPEN. Request blocked.")
+            # ADZUNA_API_ERRORS_TOTAL.labels(endpoint='N/A', country='N/A', error_type='CircuitBreakerOpen').inc() # Handled in _make_request
+            raise requests.exceptions.ConnectionError("Circuit Breaker is OPEN.")
+
+    def _handle_circuit_breaker_failure(self):
+        """Logic to handle a failure in the context of the circuit breaker."""
+        self._cb_failures += 1
+        self._cb_last_failure_time = time.monotonic()
+        if self._cb_state == STATE_HALF_OPEN:
+            self._cb_state = STATE_OPEN # Revert to OPEN if HALF_OPEN fails
+            self._cb_failures = self.CB_MAX_FAILURES # Ensure it stays open
+            ADZUNA_CIRCUIT_BREAKER_STATE_CHANGES_TOTAL.labels(new_state=STATE_OPEN).inc()
+            logger.warning("Circuit Breaker: HALF_OPEN request failed. State changed back to OPEN.")
+        elif self._cb_failures >= self.CB_MAX_FAILURES and self._cb_state != STATE_OPEN: # Avoid double increment if already open
+            self._cb_state = STATE_OPEN
+            ADZUNA_CIRCUIT_BREAKER_STATE_CHANGES_TOTAL.labels(new_state=STATE_OPEN).inc()
+            logger.warning(f"Circuit Breaker: Max failures ({self.CB_MAX_FAILURES}) reached. State changed to OPEN.")
+
+    def _handle_circuit_breaker_success(self):
+        """Logic to handle a success in the context of the circuit breaker."""
+        if self._cb_state == STATE_HALF_OPEN:
+            self._cb_half_open_success_count += 1
+            if self._cb_half_open_success_count >= self.CB_HALF_OPEN_MAX_REQUESTS:
+                self._cb_state = STATE_CLOSED
+                self._cb_failures = 0
+                self._cb_last_failure_time = None
+                logger.info("Circuit Breaker: HALF_OPEN requests successful. State changed to CLOSED.")
+        elif self._cb_state == STATE_CLOSED: # Reset failures if it was already closed
+            self._cb_failures = 0
+            self._cb_last_failure_time = None
+
+
     def _make_request(self, endpoint: str, params: Dict[str, Any] = None) -> Dict[str, Any]:
-        """Make authenticated request to Adzuna API."""
+        """Make authenticated request to Adzuna API with circuit breaker and retries."""
+        if self._cb_state == STATE_OPEN:
+            self._handle_circuit_breaker_open() # Might raise ConnectionError or change to HALF_OPEN
+
+        # Proactive request delay
+        if self.REQUEST_DELAY_SECONDS > 0:
+            time.sleep(self.REQUEST_DELAY_SECONDS)
+
         if not self.app_id or not self.api_key:
+            # This check remains for mock data even if circuit is closed/half-open
             logger.warning("Adzuna API credentials not configured - using mock data")
             return self._get_mock_response(endpoint, params)
         
-        # Add authentication parameters
-        auth_params = {
-            'app_id': self.app_id,
-            'app_key': self.api_key,
-        }
-        
+        auth_params = {'app_id': self.app_id, 'app_key': self.api_key}
         if params:
             auth_params.update(params)
         
@@ -48,12 +159,25 @@ class AdzunaAPIClient:
         
         try:
             response = self.session.get(url, params=auth_params, timeout=30)
-            response.raise_for_status()
+            response.raise_for_status()  # Raises HTTPError for bad responses (4xx or 5xx)
+            self._handle_circuit_breaker_success()
             return response.json()
-        except requests.exceptions.RequestException as e:
-            logger.error(f"Adzuna API request failed: {e}")
+        except requests.exceptions.HTTPError as e:
+            # Specific handling for 429, though retry should handle it first
+            if e.response.status_code == 429:
+                logger.warning(f"Adzuna API rate limit hit (429): {e}. Retries configured.")
+            # For other HTTP errors that persist after retries, count as failure for CB
+            logger.error(f"Adzuna API HTTPError after retries: {e}")
+            self._handle_circuit_breaker_failure()
+            # Fallback to mock response or re-raise depending on desired strictness
+            # For now, falling back to mock to prevent full stop during dev if API has issues
             return self._get_mock_response(endpoint, params)
-    
+        except requests.exceptions.RequestException as e:
+            # Includes ConnectionError, Timeout, TooManyRedirects etc.
+            logger.error(f"Adzuna API request failed after retries: {e}")
+            self._handle_circuit_breaker_failure()
+            return self._get_mock_response(endpoint, params)
+
     def _get_mock_response(self, endpoint: str, params: Dict[str, Any] = None) -> Dict[str, Any]:
         """Return mock data for development/testing."""
         return {
@@ -83,41 +207,6 @@ class AdzunaAPIClient:
                 } for i in range(1, 11)
             ]
         }
-    
-    def search_jobs(
-        self,
-        what: str = "",
-        where: str = "us",
-        results_per_page: int = 50,
-        page: int = 1,
-        max_days_old: int = 7,
-        sort_by: str = "date"
-    ) -> Dict[str, Any]:
-        """
-        Search for jobs on Adzuna.
-        
-        Args:
-            what: Job title or keywords
-            where: Location (default: "us" for United States)
-            results_per_page: Number of results per page (max 50)
-            page: Page number to fetch
-            max_days_old: How many days back to search
-            sort_by: Sort order ("date", "salary", "relevance")
-        
-        Returns:
-            Dictionary containing search results
-        """
-        endpoint = f"/jobs/{where}/search/{page}"
-        
-        params = {
-            'what': what,
-            'results_per_page': min(results_per_page, 50),
-            'max_days_old': max_days_old,
-            'sort_by': sort_by,
-        }
-        
-        logger.info(f"Searching Adzuna jobs: what='{what}', where='{where}', page={page}")
-        return self._make_request(endpoint, params)
     
     def search_jobs(
         self,
@@ -181,21 +270,18 @@ class AdzunaAPIClient:
             params['company'] = company
         
         # Update endpoint with page number
-        endpoint = f"/jobs/us/search/{page}"
+        endpoint = f"/jobs/{where.lower()}/search/{page}" # Standardize country to lowercase
         
+        logger.info(f"Searching Adzuna jobs: what='{what}', where='{where}', page={page}, params={params}")
         return self._make_request(endpoint, params)
 
     def get_job_details(self, job_id: str, country: str = "us") -> Dict[str, Any]:
         """Get detailed information about a specific job."""
-        endpoint = f"/jobs/{country}/details/{job_id}"
+        endpoint = f"/jobs/{country.lower()}/details/{job_id}" # Standardize country to lowercase
+        logger.info(f"Fetching job details for job_id='{job_id}', country='{country}'")
         return self._make_request(endpoint)
     
-    def get_job_details(self, job_id: str) -> Dict[str, Any]:
-        """Get detailed information for a specific job."""
-        endpoint = f"/jobs/us/{job_id}"
-        return self._make_request(endpoint)
-    
-    def get_salary_data(self, job_title: str, location: str = "") -> Dict[str, Any]:
+    def get_salary_data(self, job_title: str, location: str = "", country: str = "us") -> Dict[str, Any]:
         """Get salary statistics for a job title and location."""
         endpoint = "/jobs/us/histogram"
         params = {
@@ -287,15 +373,19 @@ class AdzunaJobProcessor:
                 
                 for job_data in jobs:
                     try:
-                        result = self._process_job(job_data)
-                        stats['processed'] += 1
-                        if result == 'created':
-                            stats['created'] += 1
-                        elif result == 'updated':
-                            stats['updated'] += 1
-                    except Exception as e:
-                        logger.error(f"Error processing job {job_data.get('id', 'unknown')}: {e}")
-                        stats['errors'] += 1
+                        country_label = where # Assuming 'where' is the country for this context
+                        try:
+                            result = self._process_job(job_data, country_label) # Pass country for metrics
+                            stats['processed'] += 1
+                            if result == 'created':
+                                stats['created'] += 1
+                            elif result == 'updated':
+                                stats['updated'] += 1
+                            # 'skipped' is handled by ADZUNA_JOBS_PROCESSED_TOTAL in _process_job
+                        except Exception as e:
+                            logger.error(f"Error processing job {job_data.get('id', 'unknown')}: {e}")
+                            stats['errors'] += 1
+                            ADZUNA_JOBS_PROCESSED_TOTAL.labels(country=country_label, status='error').inc()
                 
                 logger.info(f"Processed page {page}: {len(jobs)} jobs")
             
@@ -313,17 +403,76 @@ class AdzunaJobProcessor:
         
         logger.info(f"Adzuna job fetch completed: {stats}")
         return stats
+
+    def sync_recent_jobs(self, days: int = 1, countries: Optional[List[str]] = None) -> Dict[str, int]:
+        """
+        Synchronizes recent jobs from Adzuna across predefined categories and specified countries.
+
+        Args:
+            days: How many days back to search for recent jobs.
+            countries: A list of country codes (e.g., ['us', 'gb']) to fetch jobs from.
+                       Defaults to ['us'] if None.
+
+        Returns:
+            Dictionary with overall processing statistics.
+        """
+        if countries is None:
+            countries = ['us']
+
+        overall_stats = {
+            'total_found': 0,
+            'processed': 0,
+            'created': 0,
+            'updated': 0,
+            'errors': 0,
+        }
+
+        # Broader categories that are likely to yield diverse results
+        # These can be configured or expanded as needed
+        general_categories = [
+            "software development", "engineering", "project manager",
+            "data analyst", "marketing", "sales", "customer service",
+            "designer", "product manager", "business analyst"
+        ]
+
+        logger.info(f"Starting Adzuna recent jobs sync for {days} day(s) in countries: {countries}")
+
+        for country_code in countries:
+            logger.info(f"Fetching jobs for country: {country_code}")
+            for category in general_categories:
+                logger.info(f"Fetching category '{category}' for country '{country_code}'")
+                try:
+                    # Fetching 1 page per category to get the most recent, can be adjusted
+                    stats = self.fetch_and_process_jobs(
+                        what=category,
+                        where=country_code,
+                        max_pages=1, # Adjust as needed, 1 page to get ~50 most recent
+                        max_days_old=days
+                    )
+                    for key in overall_stats:
+                        overall_stats[key] += stats.get(key, 0)
+                except Exception as e:
+                    logger.error(f"Error syncing category '{category}' in '{country_code}': {e}")
+                    overall_stats['errors'] += 1 # Count this as a general error for the category sync
+
+        logger.info(f"Adzuna recent jobs sync completed: {overall_stats}")
+        return overall_stats
     
-    def _process_job(self, job_data: Dict[str, Any]) -> str:
+    def _process_job(self, job_data: Dict[str, Any], country_label: str = 'unknown') -> str:
         """
         Process a single job from Adzuna API data.
         
+        Args:
+            job_data: Dictionary containing job data from Adzuna.
+            country_label: The country label for metrics.
+
         Returns:
             'created', 'updated', or 'skipped'
         """
         external_id = str(job_data.get('id', ''))
         if not external_id:
             logger.warning("Job missing ID, skipping")
+            ADZUNA_JOBS_PROCESSED_TOTAL.labels(country=country_label, status='skipped_no_id').inc()
             return 'skipped'
         
         # Extract job information
@@ -378,11 +527,13 @@ class AdzunaJobProcessor:
                 if value is not None:
                     setattr(existing_job, field, value)
             existing_job.save()
+            ADZUNA_JOBS_PROCESSED_TOTAL.labels(country=country_label, status='updated').inc()
             return 'updated'
         else:
             # Create new job
             job_defaults['external_id'] = external_id
             Job.objects.create(**job_defaults)
+            ADZUNA_JOBS_PROCESSED_TOTAL.labels(country=country_label, status='created').inc()
             return 'created'
     
     def _map_contract_type(self, contract_type: str) -> str:
