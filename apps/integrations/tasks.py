@@ -871,9 +871,18 @@ def submit_skyvern_application_task(self, application_id: str, job_url: str, pro
         cover_letter_base64: Base64 encoded cover letter content (optional).
     """
     from apps.integrations.services.skyvern import SkyvernAPIClient
-    # from apps.jobs.models import Application # To update application status
+    from apps.jobs.models import Application # Now using the Application model
 
     logger.info(f"Starting Skyvern application task for JobRaker app ID: {application_id}, Job URL: {job_url}")
+
+    try:
+        application = Application.objects.get(id=application_id)
+    except Application.DoesNotExist:
+        logger.error(f"Application {application_id} not found in submit_skyvern_application_task.")
+        # Increment a metric for this case if desired
+        SKYVERN_APPLICATION_SUBMISSIONS_TOTAL.labels(status='application_not_found').inc()
+        return {"status": "error", "application_id": application_id, "error": "Application not found"}
+
     client = SkyvernAPIClient()
 
     # Construct inputs for Skyvern
@@ -902,23 +911,27 @@ def submit_skyvern_application_task(self, application_id: str, job_url: str, pro
         if response and response.get("task_id"):
             skyvern_task_id = response["task_id"]
             logger.info(f"Skyvern task created: {skyvern_task_id} for JobRaker app ID: {application_id}")
-            # Update JobRaker Application model with skyvern_task_id and set status to 'PENDING_SKYVERN'
-            # Example:
-            # Application.objects.filter(id=application_id).update(
-            #     skyvern_task_id=skyvern_task_id,
-            #     status='pending_skyvern_submission' # Example status
-            # )
+
+            application.skyvern_task_id = skyvern_task_id
+            application.status = 'submitting_via_skyvern' # Using one of the new statuses
+            application.save(update_fields=['skyvern_task_id', 'status', 'updated_at'])
+
             SKYVERN_APPLICATION_SUBMISSIONS_TOTAL.labels(status='initiated').inc()
             return {"status": "success", "skyvern_task_id": skyvern_task_id, "application_id": application_id}
         else:
             logger.error(f"Skyvern task creation failed for JobRaker app ID: {application_id}. Response: {response}")
-            # Application.objects.filter(id=application_id).update(status='skyvern_submission_failed')
+            application.status = 'skyvern_submission_failed' # New status
+            application.skyvern_response_data = response # Store failure response if any
+            application.save(update_fields=['status', 'skyvern_response_data', 'updated_at'])
             SKYVERN_APPLICATION_SUBMISSIONS_TOTAL.labels(status='creation_failed').inc()
             return {"status": "failure", "application_id": application_id, "error": "Task creation failed", "response": response}
 
     except Exception as exc:
         logger.error(f"Error in submit_skyvern_application_task for app ID {application_id}: {exc}")
-        # Application.objects.filter(id=application_id).update(status='skyvern_submission_error')
+        if 'application' in locals(): # Check if application object was fetched
+            application.status = 'skyvern_submission_failed' # Or a more generic error status
+            application.skyvern_response_data = {'error': str(exc)}
+            application.save(update_fields=['status', 'skyvern_response_data', 'updated_at'])
         SKYVERN_APPLICATION_SUBMISSIONS_TOTAL.labels(status='task_exception').inc()
         raise self.retry(exc=exc, countdown=60 * (2 ** self.request.retries))
 
@@ -932,9 +945,19 @@ def check_skyvern_task_status_task(self, skyvern_task_id: str, application_id: s
         application_id: JobRaker internal application ID for tracking.
     """
     from apps.integrations.services.skyvern import SkyvernAPIClient
-    # from apps.jobs.models import Application # To update application status
+    from apps.jobs.models import Application # Now using the Application model
+    from django.utils import timezone
 
     logger.info(f"Checking Skyvern task status for task_id: {skyvern_task_id}, JobRaker app ID: {application_id}")
+
+    try:
+        application = Application.objects.get(id=application_id, skyvern_task_id=skyvern_task_id)
+    except Application.DoesNotExist:
+        logger.error(f"Application {application_id} with Skyvern task ID {skyvern_task_id} not found in check_skyvern_task_status_task.")
+        SKYVERN_APPLICATION_SUBMISSIONS_TOTAL.labels(status='check_app_not_found').inc()
+        # Do not retry if app not found, as it's a data integrity issue.
+        return {"status": "error", "application_id": application_id, "error": "Application for Skyvern task not found"}
+
     client = SkyvernAPIClient()
 
     try:
@@ -942,39 +965,59 @@ def check_skyvern_task_status_task(self, skyvern_task_id: str, application_id: s
 
         if not status_response:
             logger.warning(f"Failed to get status for Skyvern task {skyvern_task_id}. Will retry.")
-            # No status update, rely on retry
-            raise Exception(f"No response from Skyvern for task status {skyvern_task_id}")
+            raise Exception(f"No response from Skyvern for task status {skyvern_task_id}") # Trigger retry
 
-        current_skyvern_status = status_response.get("status")
+        current_skyvern_status = status_response.get("status") # e.g., PENDING, RUNNING, COMPLETED, FAILED
         logger.info(f"Skyvern task {skyvern_task_id} status: {current_skyvern_status}")
 
-        # Determine JobRaker application status based on Skyvern status
-        # new_jobraker_status = None
-        # if current_skyvern_status == "COMPLETED":
-        #     new_jobraker_status = 'applied_via_skyvern' # Example
-        #     SKYVERN_APPLICATION_SUBMISSIONS_TOTAL.labels(status='completed_success').inc()
-        #     # Optionally, trigger results fetching task or do it here if response is small
-        #     # retrieve_skyvern_task_results_task.delay(skyvern_task_id, application_id)
-        # elif current_skyvern_status == "FAILED":
-        #     new_jobraker_status = 'skyvern_application_failed' # Example
-        #     SKYVERN_APPLICATION_SUBMISSIONS_TOTAL.labels(status='failed').inc()
-        # elif current_skyvern_status in ["PENDING", "RUNNING"]:
-        #     # Task is still ongoing, schedule another check if not using webhooks
-        #     logger.info(f"Skyvern task {skyvern_task_id} is still {current_skyvern_status}. Will re-check if polled.")
-        #     # self.retry(countdown=15 * 60) # Retry after 15 mins if still pending/running
-        #     return {"status": "pending_skyvern", "skyvern_task_id": skyvern_task_id, "application_id": application_id}
-        # else: # CANCELED, REQUIRES_ATTENTION, or other unknown statuses
-        #     new_jobraker_status = 'skyvern_attention_needed' # Example
-        #     SKYVERN_APPLICATION_SUBMISSIONS_TOTAL.labels(status=str(current_skyvern_status).lower()).inc()
+        new_jobraker_status = application.status # Keep current status if no change
+        skyvern_message = status_response.get("message", "")
 
-        # if new_jobraker_status:
-        #     Application.objects.filter(id=application_id).update(status=new_jobraker_status)
-        #     logger.info(f"Updated JobRaker app ID {application_id} status to {new_jobraker_status} based on Skyvern task {skyvern_task_id}")
+        if current_skyvern_status == "COMPLETED":
+            new_jobraker_status = 'submitted' # Successfully submitted via Skyvern
+            application.applied_at = timezone.now() # Mark as applied now
+            SKYVERN_APPLICATION_SUBMISSIONS_TOTAL.labels(status='completed_success').inc()
+            # Trigger results fetching task
+            retrieve_skyvern_task_results_task.delay(skyvern_task_id, application_id)
+        elif current_skyvern_status == "FAILED":
+            new_jobraker_status = 'skyvern_submission_failed'
+            SKYVERN_APPLICATION_SUBMISSIONS_TOTAL.labels(status='failed').inc()
+            # Store error details from Skyvern if available in results, or this message
+            application.skyvern_response_data = status_response # Store the status response itself
+        elif current_skyvern_status == "CANCELED":
+            new_jobraker_status = 'skyvern_canceled'
+            SKYVERN_APPLICATION_SUBMISSIONS_TOTAL.labels(status='canceled').inc()
+            application.skyvern_response_data = status_response
+        elif current_skyvern_status == "REQUIRES_ATTENTION":
+            new_jobraker_status = 'skyvern_requires_attention'
+            SKYVERN_APPLICATION_SUBMISSIONS_TOTAL.labels(status='requires_attention').inc()
+            application.skyvern_response_data = status_response
+        elif current_skyvern_status in ["PENDING", "RUNNING"]:
+            # Still ongoing, ensure JobRaker status reflects this if it was different
+            if application.status not in ['submitting_via_skyvern']:
+                 new_jobraker_status = 'submitting_via_skyvern'
+            logger.info(f"Skyvern task {skyvern_task_id} is still {current_skyvern_status}.")
+            # No need to explicitly retry here for PENDING/RUNNING if this task is scheduled periodically by Celery Beat,
+            # or if a webhook is the primary update mechanism. If purely polling, a retry might be desired.
+            # For now, assume periodic checks or webhook will handle follow-up.
+        else: # Unknown status
+            logger.warning(f"Unknown Skyvern status '{current_skyvern_status}' for task {skyvern_task_id}.")
+            # Potentially set a generic error or requires attention status
+            # For now, no status change for unknown Skyvern status.
 
-        # For now, just returning the Skyvern status. DB update logic is commented out.
+        if new_jobraker_status != application.status or application.applied_at: # If status changed or applied_at set
+            application.status = new_jobraker_status
+            fields_to_update = ['status', 'updated_at']
+            if application.applied_at: # Ensure applied_at is in update_fields if set
+                fields_to_update.append('applied_at')
+            if application.skyvern_response_data: # Ensure response data is in update_fields if set
+                fields_to_update.append('skyvern_response_data')
+            application.save(update_fields=fields_to_update)
+            logger.info(f"Updated JobRaker app ID {application_id} status to {new_jobraker_status} for Skyvern task {skyvern_task_id}")
+
         return {"status": "polled", "skyvern_task_id": skyvern_task_id, "skyvern_status": current_skyvern_status, "application_id": application_id}
 
-    except Exception as exc:
+    except Exception as exc: # For API call errors or other issues
         logger.error(f"Error in check_skyvern_task_status_task for Skyvern task {skyvern_task_id}: {exc}")
         raise self.retry(exc=exc) # Celery will use default_retry_delay
 
@@ -983,21 +1026,43 @@ def check_skyvern_task_status_task(self, skyvern_task_id: str, application_id: s
 @shared_task(bind=True, max_retries=3)
 def retrieve_skyvern_task_results_task(self, skyvern_task_id: str, application_id: str):
     from apps.integrations.services.skyvern import SkyvernAPIClient
-    # from apps.jobs.models import Application # To store results
+    from apps.jobs.models import Application # Now using the Application model
 
     logger.info(f"Retrieving results for Skyvern task {skyvern_task_id}, JobRaker app ID: {application_id}")
+
+    try:
+        application = Application.objects.get(id=application_id, skyvern_task_id=skyvern_task_id)
+    except Application.DoesNotExist:
+        logger.error(f"Application {application_id} with Skyvern task ID {skyvern_task_id} not found in retrieve_skyvern_task_results_task.")
+        # No retry, data issue.
+        return {"status": "error", "application_id": application_id, "error": "Application for Skyvern task not found"}
+
     client = SkyvernAPIClient()
     try:
         results_response = client.get_task_results(skyvern_task_id)
+
         if results_response:
-            # Process and store results_response.get('data') or results_response.get('error_details')
-            # For example, store confirmation ID or error messages in Application model
             logger.info(f"Results for Skyvern task {skyvern_task_id}: {results_response}")
-            # Application.objects.filter(id=application_id).update(skyvern_results=results_response)
-            return {"status": "success", "skyvern_task_id": skyvern_task_id, "results": results_response}
+            application.skyvern_response_data = results_response # Store the entire raw response
+
+            # Potentially parse results_response.get('data') for specific confirmation details
+            # or results_response.get('error_details') if status was FAILED.
+            # For now, storing raw response is sufficient.
+            # If Skyvern task failed and results contain error details, ensure status reflects this.
+            skyvern_status_in_results = results_response.get("status")
+            if skyvern_status_in_results == "FAILED" and application.status != 'skyvern_submission_failed':
+                application.status = 'skyvern_submission_failed'
+                logger.info(f"Updating application {application_id} status to 'skyvern_submission_failed' based on task results.")
+
+            application.save(update_fields=['skyvern_response_data', 'status', 'updated_at'])
+            return {"status": "success", "skyvern_task_id": skyvern_task_id, "application_id": application_id, "results_fetched": True}
         else:
-            logger.warning(f"No results found for Skyvern task {skyvern_task_id} (or API call failed).")
-            return {"status": "no_results", "skyvern_task_id": skyvern_task_id}
+            logger.warning(f"No results data found for Skyvern task {skyvern_task_id} (API call might have returned None or empty).")
+            # Optionally update application model to note that results retrieval was attempted but empty.
+            application.skyvern_response_data = {"info": "Results retrieval attempted, no data returned by Skyvern."}
+            application.save(update_fields=['skyvern_response_data', 'updated_at'])
+            return {"status": "no_results_data", "skyvern_task_id": skyvern_task_id, "application_id": application_id}
+
     except Exception as exc:
         logger.error(f"Error retrieving results for Skyvern task {skyvern_task_id}: {exc}")
         raise self.retry(exc=exc)
