@@ -111,17 +111,44 @@ class WebhookView(APIView):
         # logger.info("Skyvern webhook: Signature (placeholder) verified.")
         # return True
 
-        # For now, bypass verification if no secret is set (useful for local dev without ngrok/real webhooks initially).
-        # In production, this MUST be implemented securely and `SKYVERN_WEBHOOK_SECRET` must be set.
-        if not getattr(settings, 'SKYVERN_WEBHOOK_SECRET', None):
-            logger.warning("SKYVERN_WEBHOOK_SECRET not set, skipping signature verification. FOR DEVELOPMENT/TESTING ONLY.")
-            return True
+        from django.conf import settings
+        import hmac
+        import hashlib
 
-        # Actual verification logic using the secret would go here.
-        # This placeholder will return True if secret is set but logic not implemented, which is insecure.
-        # For a real implementation, this should return False if verification fails.
-        logger.info("Skyvern webhook: Placeholder signature verification logic. Assuming success if secret is present.")
-        return True # Placeholder: assume verified
+        skyvern_signature_header = request.headers.get('X-Skyvern-Signature') # Common header, confirm with Skyvern docs
+        shared_secret = getattr(settings, 'SKYVERN_WEBHOOK_SECRET', None)
+
+        if not skyvern_signature_header:
+            logger.warning("Skyvern webhook: Missing 'X-Skyvern-Signature' header.")
+            return False
+
+        if not shared_secret:
+            logger.error("Skyvern webhook: SKYVERN_WEBHOOK_SECRET is not configured in settings. Cannot verify signature.")
+            # In a production system, you might want to return False here to block unverified webhooks.
+            # For debugging or if an insecure mode is explicitly desired for dev, one might allow it,
+            # but it's a security risk. Defaulting to secure: verification fails if secret is missing.
+            return False
+
+        payload_body = request.body # Raw body bytes
+
+        try:
+            # Calculate the expected signature
+            expected_signature = hmac.new(
+                shared_secret.encode('utf-8'),
+                payload_body,
+                hashlib.sha256
+            ).hexdigest()
+
+            # Securely compare the signatures
+            if hmac.compare_digest(expected_signature, skyvern_signature_header):
+                logger.info("Skyvern webhook: Signature verified successfully.")
+                return True
+            else:
+                logger.warning(f"Skyvern webhook: Invalid signature. Header: {skyvern_signature_header}, Calculated: {expected_signature}")
+                return False
+        except Exception as e:
+            logger.error(f"Skyvern webhook: Error during signature verification: {e}")
+            return False
 
     def _handle_skyvern_webhook(self, request):
         """
