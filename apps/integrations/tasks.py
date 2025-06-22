@@ -456,25 +456,80 @@ def get_openai_job_advice_task(self, user_id: int, advice_type: str, context: st
         # it's better to have it as a static/utility or replicate its core logic.
         # For this step, we'll mock the prompt building to focus on the async structure.
 
-        # Mocking RAG and prompt building for task structure demonstration
+        # --- RAG Implementation ---
         rag_context_str = ""
-        if query_for_rag or context:
-            text_for_rag_embedding = query_for_rag if query_for_rag else context
-            if "salary" in text_for_rag_embedding.lower():
-                 rag_context_str = "\n\nRelevant Information:\nMock RAG: Average salary for mid-level developers in SF is $120k."
+        text_for_rag_embedding = query_for_rag if query_for_rag else context
+        if text_for_rag_embedding:
+            try:
+                from apps.integrations.services.openai_service import EmbeddingService
+                from apps.common.vector_db_service import VectorDBService # Conceptual
 
-        # Simplified prompt building (actual logic is in _build_advice_prompt)
-        prompt = f"User {user_id} asks for {advice_type} advice. Context: {context}. {rag_context_str}"
+                embedding_service = EmbeddingService()
+                vdb_service = VectorDBService()
+
+                query_embedding_list = embedding_service.generate_embeddings([text_for_rag_embedding])
+                if query_embedding_list and query_embedding_list[0]:
+                    query_embedding = query_embedding_list[0]
+                    # Example: Filter RAG search by source_type if relevant to advice_type
+                    rag_filter = None
+                    if advice_type in ["resume", "interview", "application"]:
+                        rag_filter = {'source_type': 'career_article'} # Fetch general advice articles
+                    elif advice_type == "salary":
+                         rag_filter = {'source_type': 'salary_data_source'} # Hypothetical source type
+
+                    similar_docs = vdb_service.search_similar_documents(query_embedding, top_n=3, filter_criteria=rag_filter)
+
+                    if similar_docs:
+                        rag_context_parts = ["Here is some relevant information to consider:"]
+                        for doc in similar_docs:
+                            rag_context_parts.append(f"- {doc.get('text_content', '')} (Source: {doc.get('source_type', 'N/A')})")
+                        rag_context_str = "\n".join(rag_context_parts)
+                        logger.info(f"RAG: Successfully retrieved and formatted {len(similar_docs)} documents for advice task.")
+                else:
+                    logger.warning("RAG: Could not generate query embedding for advice task.")
+            except Exception as e:
+                logger.error(f"RAG pipeline error in get_openai_job_advice_task: {e}")
+        # --- End RAG Implementation ---
+
+
+                    if similar_docs:
+                        rag_context_parts = ["--- Start of Retrieved Information ---"]
+                        for i, doc in enumerate(similar_docs):
+                            doc_info = f"Document {i+1} (Source: {doc.get('source_type', 'N/A')}, ID: {doc.get('source_id', 'N/A')}):"
+                            rag_context_parts.append(f"{doc_info}\n{doc.get('text_content', '')}")
+                        rag_context_parts.append("--- End of Retrieved Information ---")
+                        rag_context_str = "\n\n".join(rag_context_parts)
+                        logger.info(f"RAG: Successfully retrieved and formatted {len(similar_docs)} documents for advice task.")
+                else:
+                    logger.warning("RAG: Could not generate query embedding for advice task.")
+            except Exception as e:
+                logger.error(f"RAG pipeline error in get_openai_job_advice_task: {e}")
+        # --- End RAG Implementation ---
+
+        # Refined prompt building
+        user_profile_summary = "Not specified."
         if user_profile_data:
-            prompt += f"\nUser profile: {user_profile_data.get('experience_level', '')}, Skills: {user_profile_data.get('skills', [])}"
+            user_profile_summary = f"Experience: {user_profile_data.get('experience_level', 'N/A')}, Skills: {', '.join(user_profile_data.get('skills', []))}."
 
+        user_prompt_main_query = f"A user (Profile: {user_profile_summary}) is asking for {advice_type} advice. Their specific question or context is: \"{context}\"."
+
+        prompt_parts = [user_prompt_main_query]
+        if rag_context_str:
+            prompt_parts.append("\nPlease use the following retrieved information, if relevant, to enhance your answer:")
+            prompt_parts.append(rag_context_str)
+        user_content_prompt = "\n\n".join(prompt_parts)
+
+        system_message_content = """You are an expert career advisor. Your goal is to provide helpful, actionable advice.
+If you are provided with 'Retrieved Information', prioritize using it to answer the user's query, but also use your general knowledge.
+Synthesize information rather than just copying from the retrieved documents.
+If the retrieved information is not relevant, rely on your general expertise.
+Be specific and tailor your advice to the user's profile and question."""
 
         if not api_key:
-            # Simplified mock response, actual logic in _get_mock_advice
             logger.warning(f"OpenAI API key not configured for task: get_openai_job_advice_task for user {user_id}")
             return {'advice_type': advice_type, 'advice': "Mock advice due to no API key.", 'model_used': 'mock_task', 'success': True}
 
-        openai.api_key = api_key # Ensure API key is set for this task instance/call
+        openai.api_key = api_key
 
         start_time = time.monotonic()
         status = 'error'
@@ -482,8 +537,8 @@ def get_openai_job_advice_task(self, user_id: int, advice_type: str, context: st
             response = openai.ChatCompletion.create(
                 model=model,
                 messages=[
-                    {"role": "system", "content": "You are an expert career advisor."},
-                    {"role": "user", "content": prompt}
+                    {"role": "system", "content": system_message_content},
+                    {"role": "user", "content": user_content_prompt}
                 ],
                 max_tokens=1000,
                 temperature=0.7
@@ -521,19 +576,69 @@ def get_openai_chat_response_task(self, user_id: int, message: str, conversation
         api_key = getattr(settings, 'OPENAI_API_KEY', '')
         model = getattr(settings, 'OPENAI_MODEL', 'gpt-4')
 
-        # Simplified RAG placeholder for task
+        # --- RAG Implementation ---
         rag_context_str = ""
-        if "recommend jobs" in message.lower():
-            rag_context_str = "\n\nRelevant Information to consider:\nMock RAG: Found 3 matching senior python developer roles in New York."
+        if message: # Use the user's message for RAG query
+            try:
+                from apps.integrations.services.openai_service import EmbeddingService
+                from apps.common.vector_db_service import VectorDBService # Conceptual
 
-        # Simplified system prompt building
-        system_prompt = "You are a helpful AI job search assistant."
+                embedding_service = EmbeddingService()
+                vdb_service = VectorDBService()
+
+                query_embedding_list = embedding_service.generate_embeddings([message])
+                if query_embedding_list and query_embedding_list[0]:
+                    query_embedding = query_embedding_list[0]
+                    # Generic search for chat, could be refined with intent detection later
+                    similar_docs = vdb_service.search_similar_documents(query_embedding, top_n=3)
+
+                    if similar_docs:
+                        rag_context_parts = ["Here is some relevant information to consider:"]
+                        for doc in similar_docs:
+                            rag_context_parts.append(f"- {doc.get('text_content', '')} (Source: {doc.get('source_type', 'N/A')})")
+                        rag_context_str = "\n".join(rag_context_parts)
+                        logger.info(f"RAG: Successfully retrieved and formatted {len(similar_docs)} documents for chat task.")
+                else:
+                    logger.warning("RAG: Could not generate query embedding for chat task.")
+            except Exception as e:
+                logger.error(f"RAG pipeline error in get_openai_chat_response_task: {e}")
+        # --- End RAG Implementation ---
+
+
+                    if similar_docs:
+                        rag_context_parts = ["--- Start of Retrieved Context ---"]
+                        for i, doc in enumerate(similar_docs):
+                            doc_info = f"Context Item {i+1} (Source: {doc.get('source_type', 'N/A')}, ID: {doc.get('source_id', 'N/A')}):"
+                            rag_context_parts.append(f"{doc_info}\n{doc.get('text_content', '')}")
+                        rag_context_parts.append("--- End of Retrieved Context ---")
+                        rag_context_str = "\n\n".join(rag_context_parts)
+                        logger.info(f"RAG: Successfully retrieved and formatted {len(similar_docs)} documents for chat task.")
+                else:
+                    logger.warning("RAG: Could not generate query embedding for chat task.")
+            except Exception as e:
+                logger.error(f"RAG pipeline error in get_openai_chat_response_task: {e}")
+        # --- End RAG Implementation ---
+
+        # Refined system prompt building
+        user_profile_context = "Not specified."
         if user_profile_data:
-            system_prompt += f"\nUser has experience: {user_profile_data.get('experience_level', 'N/A')}"
-        if rag_context_str:
-            system_prompt += rag_context_str
+            user_profile_context = f"Experience: {user_profile_data.get('experience_level', 'N/A')}, Skills: {', '.join(user_profile_data.get('skills', []))}."
 
-        messages_payload = [{"role": "system", "content": system_prompt}]
+        system_prompt_parts = [
+            f"You are Jobraker AI, a helpful and friendly job search assistant.",
+            f"User Profile Context: {user_profile_context}",
+            "Always aim to be encouraging and provide actionable steps or information.",
+            "Keep your responses conversational but professional."
+        ]
+        if rag_context_str:
+            system_prompt_parts.append(f"\nUse the following retrieved context to inform your response if it's relevant to the user's message. Synthesize it with your general knowledge and do not simply repeat it:")
+            system_prompt_parts.append(rag_context_str)
+        else:
+            system_prompt_parts.append("\nAnswer the user's questions based on your general knowledge and the conversation history.")
+
+        final_system_prompt = "\n".join(system_prompt_parts)
+
+        messages_payload = [{"role": "system", "content": final_system_prompt}]
         if conversation_history:
             messages_payload.extend(conversation_history[-10:])
         messages_payload.append({"role": "user", "content": message})
