@@ -632,3 +632,73 @@ class ErrorResponseSerializer(serializers.Serializer):
     error = serializers.CharField(help_text="Error message")
     details = serializers.DictField(required=False, help_text="Detailed error information")
     error_code = serializers.CharField(required=False, help_text="Machine-readable error code")
+
+
+@extend_schema_serializer(
+    examples=[
+        OpenApiExample(
+            'Recommended Job Example',
+            summary='A single job recommendation for a user',
+            description='Details of a job recommended to a user, including the match score and job info.',
+            value={
+                "id": "d8f8f8f8-f8f8-f8f8-f8f8-f8f8f8f8f8f8",
+                "job": { # Using JobListSerializer structure
+                    "id": "550e8400-e29b-41d4-a716-446655440000",
+                    "title": "Senior Python Developer",
+                    "company": "TechCorp Inc.",
+                    "location": "San Francisco, CA",
+                    "job_type": "full_time",
+                    "experience_level": "senior",
+                    "salary_min": 120000,
+                    "salary_max": 160000,
+                    "salary_range_display": "$120,000 - $160,000",
+                    "is_remote": True,
+                    "posted_date": "2025-06-15T10:00:00Z",
+                    "external_url": "https://example.com/jobs/123",
+                    "company_logo_url": "https://example.com/logo.png",
+                    "view_count": 245
+                },
+                "score": 0.8875,
+                "status": "pending_review",
+                "algorithm_version": "v1.0_profile_match",
+                "recommended_at": "2025-06-18T10:00:00Z",
+                "updated_at": "2025-06-18T10:00:00Z"
+            }
+        )
+    ]
+)
+class RecommendedJobSerializer(serializers.ModelSerializer):
+    """
+    Serializer for RecommendedJob model.
+    Includes nested job details using JobListSerializer for brevity.
+    Allows users to see their job recommendations and update their status.
+    """
+    job = JobListSerializer(read_only=True)
+    # Allow status updates by the user, but other fields are mostly read-only from user's perspective
+    # The user would typically interact by changing the status (e.g., 'viewed', 'dismissed', 'applied')
+
+    class Meta:
+        model = RecommendedJob
+        fields = [
+            'id',
+            'job',
+            'score',
+            'status',
+            'algorithm_version',
+            'recommended_at',
+            'updated_at'
+        ]
+        read_only_fields = ('id', 'job', 'score', 'algorithm_version', 'recommended_at', 'updated_at')
+        # 'status' can be updated by the user through a PATCH request on a detail endpoint.
+        # For a ListAPIView, this serializer would be read-only.
+        # If allowing status updates, a separate serializer for PATCH might be cleaner or handle it in the view.
+
+    # If status updates are allowed via this serializer on a detail view (e.g. PATCH /recommendations/{id}/)
+    # you might want to limit the choices for status updates here.
+    # For a simple list view, read_only_fields above is fine.
+    # If PATCH is used for status:
+    # def update(self, instance, validated_data):
+    #     instance.status = validated_data.get('status', instance.status)
+    #     # Potentially add logic here if changing status should trigger other actions
+    #     instance.save()
+    #     return instance
