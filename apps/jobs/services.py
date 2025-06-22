@@ -244,3 +244,110 @@ class JobMatchService:
         scaled_score = (similarity_score + 1) / 2
         logger.info(f"Calculated similarity score for UserProf {user_profile_id} and Job {job_id}: {scaled_score:.4f} (raw cosine: {similarity_score:.4f})")
         return round(scaled_score, 4)
+
+    def generate_recommendations_for_user(
+        self,
+        user_profile_id: Any,
+        num_recommendations: int = 10,
+        algorithm_version: str = "v1.0_profile_match"
+    ) -> List[Dict[str, Any]]:
+        """
+        Generates and stores job recommendations for a user.
+        It uses find_matching_jobs_for_user, then filters out already applied/dismissed jobs,
+        and saves new/updated recommendations.
+
+        Args:
+            user_profile_id: The ID of the UserProfile.
+            num_recommendations: The desired number of recommendations to generate/store.
+            algorithm_version: A version string for the recommendation algorithm used.
+
+        Returns:
+            A list of dictionaries representing the created/updated RecommendedJob entries.
+            Example: [{'recommended_job_id': rec.id, 'job_id': job.id, ...}, ...]
+        """
+        from apps.jobs.models import Application, RecommendedJob # Import here to avoid circularity at module level
+        from django.contrib.auth import get_user_model
+        User = get_user_model()
+
+        try:
+            # Assuming UserProfile ID is the same as User ID for simplicity in this example,
+            # or that UserProfile has a 'user_id' field or is directly the user's profile.
+            # If user_profile_id is for UserProfile model, and UserProfile has a OneToOne with User:
+            user = User.objects.get(profile__id=user_profile_id)
+        except User.DoesNotExist:
+            logger.error(f"User for UserProfile ID {user_profile_id} not found for generating recommendations.")
+            return []
+        except Exception as e: # Catch other potential errors like User.profile.RelatedObjectDoesNotExist
+            logger.error(f"Error fetching user for UserProfile ID {user_profile_id}: {e}")
+            return []
+
+        # 1. Get potential job matches using existing service method
+        # Fetch more than num_recommendations initially to account for filtering.
+        potential_matches = self.find_matching_jobs_for_user(
+            user_profile_id=user_profile_id,
+            top_n=num_recommendations * 3 # Fetch more (e.g., 3x) to filter from
+        )
+
+        if not potential_matches:
+            logger.info(f"No initial matches from find_matching_jobs_for_user for UserProfile {user_profile_id}.")
+            return []
+
+        # 2. Filter out jobs already applied to by the user
+        applied_job_ids = set(
+            Application.objects.filter(user=user).values_list('job_id', flat=True)
+        )
+
+        # 3. Filter out jobs already dismissed or marked irrelevant by the user
+        existing_recommendations = RecommendedJob.objects.filter(user=user)
+        dismissed_job_ids = set(
+            existing_recommendations.filter(status__in=['dismissed', 'irrelevant'])
+                                 .values_list('job_id', flat=True)
+        )
+
+        final_recommendations_data = []
+        processed_job_ids_for_this_batch = set() # To avoid duplicates if find_matching_jobs had them (unlikely with current logic)
+
+        for match in potential_matches:
+            job = match['job']
+            score = match['score']
+
+            if job.id in applied_job_ids:
+                logger.debug(f"Skipping job {job.id} for recs (already applied) for user {user.id}")
+                continue
+            if job.id in dismissed_job_ids:
+                logger.debug(f"Skipping job {job.id} for recs (dismissed/irrelevant) for user {user.id}")
+                continue
+            if job.id in processed_job_ids_for_this_batch:
+                continue
+
+            # Create or Update RecommendedJob entry
+            recommended_job, created = RecommendedJob.objects.update_or_create(
+                user=user,
+                job=job,
+                defaults={
+                    'score': score,
+                    'algorithm_version': algorithm_version,
+                    'status': 'pending_review', # Reset to pending review if re-recommended or new
+                    # 'recommended_at' will be updated by auto_now on save if it's an update,
+                    # or set by auto_now_add if created.
+                }
+            )
+
+            action_status = "created" if created else "updated"
+            logger.info(f"Recommendation {action_status} for user {user.id}, job {job.id} (RecID: {recommended_job.id}) with score {score:.3f}")
+
+            final_recommendations_data.append({
+                'recommended_job_id': recommended_job.id,
+                'job_id': job.id,
+                'job_title': job.title,
+                'score': score,
+                'status': recommended_job.status, # The status after update_or_create
+                'action': action_status
+            })
+            processed_job_ids_for_this_batch.add(job.id)
+
+            if len(final_recommendations_data) >= num_recommendations:
+                break
+
+        logger.info(f"Generated {len(final_recommendations_data)} final recommendations for user {user.id} (profile_id {user_profile_id}).")
+        return final_recommendations_data

@@ -45,6 +45,11 @@ app.conf.beat_schedule = {
         'task': 'apps.notifications.tasks.cleanup_old_notifications',
         'schedule': 86400.0,  # Run daily
     },
+    'batch-generate-recommendations': {
+        'task': 'apps.jobs.tasks.batch_generate_recommendations_for_active_users_task',
+        'schedule': 86400.0,  # Run daily (24 * 60 * 60 seconds)
+        # 'args': (), # Add any default arguments if needed
+    },
 }
 
 @app.task(bind=True)
