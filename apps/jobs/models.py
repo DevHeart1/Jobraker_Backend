@@ -383,3 +383,56 @@ class JobSource(models.Model):
         
         self.last_sync_at = timezone.now()
         self.save(update_fields=['successful_syncs', 'failed_syncs', 'total_jobs_fetched', 'last_sync_at'])
+
+
+class RecommendedJob(models.Model):
+    """
+    Stores job recommendations generated for users.
+    """
+    STATUS_CHOICES = [
+        ('pending_review', 'Pending Review'), # New recommendation, user hasn't seen it
+        ('viewed', 'Viewed'),                 # User has seen the recommendation
+        ('applied', 'Applied'),               # User initiated an application from this recommendation
+        ('dismissed', 'Dismissed'),           # User indicated they are not interested
+        ('irrelevant', 'Marked as Irrelevant'), # User explicitly marked it as a bad match
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='recommended_jobs')
+    job = models.ForeignKey(Job, on_delete=models.CASCADE, related_name='recommendations_for_users')
+
+    score = models.FloatField(
+        validators=[MinValueValidator(0.0), MaxValueValidator(1.0)], # Assuming score is 0-1
+        help_text="Similarity or match score (0.0 to 1.0)."
+    )
+    algorithm_version = models.CharField(
+        max_length=50,
+        blank=True,
+        null=True,
+        help_text="Version of the recommendation algorithm used."
+    )
+    status = models.CharField(
+        max_length=20,
+        choices=STATUS_CHOICES,
+        default='pending_review',
+        db_index=True,
+        help_text="User's interaction status with this recommendation."
+    )
+
+    recommended_at = models.DateTimeField(auto_now_add=True, db_index=True)
+    # updated_at to track when status changes, etc.
+    updated_at = models.DateTimeField(auto_now=True)
+
+
+    class Meta:
+        db_table = 'recommended_jobs'
+        verbose_name = 'Recommended Job'
+        verbose_name_plural = 'Recommended Jobs'
+        unique_together = ('user', 'job') # A user should only have a specific job recommended once directly
+        ordering = ['user', '-score', '-recommended_at']
+        indexes = [
+            models.Index(fields=['user', 'status', '-score']),
+        ]
+
+    def __str__(self):
+        return f"Recommendation for {self.user.get_full_name()}: {self.job.title} (Score: {self.score:.3f})"
