@@ -429,24 +429,29 @@ class JobSearchView(APIView):
         
         jobs = queryset.order_by('-posted_date')[:50]  # Limit results
         
-        # TODO: Add AI-powered job matching and ranking
+        # TODO: Add AI-powered job matching and ranking (e.g. populate match_score on serialized jobs)
         
-        return Response({
-            'count': jobs.count() if hasattr(jobs, 'count') else len(jobs),
-            'results': [
-                {
-                    'id': job.id,
-                    'title': job.title,
-                    'company': job.company,
-                    'location': job.location,
-                    'salary_min': job.salary_min,
-                    'salary_max': job.salary_max,
-                    'is_remote': job.is_remote,
-                    'posted_date': job.posted_date,
-                    'url': job.url,
-                } for job in jobs
-            ]
-        })
+        # Use pagination if available and configured for APIView, or manually paginate.
+        # For simplicity, if StandardResultsSetPagination is desired, this view might be better as a ListAPIView.
+        # Assuming no pagination for this specific view for now, matching the existing structure.
+
+        # Serialize results using JobListSerializer for consistency with JobSearchResultSerializer
+        serialized_jobs = JobListSerializer(jobs, many=True).data
+
+        # Construct response using JobSearchResultSerializer structure
+        # This ensures the response schema matches what's defined in JobSearchResultSerializer
+        # and what might be expected by a frontend looking at that schema.
+        search_result_data = {
+            'count': queryset.count(), # Count on the original queryset before slicing for jobs
+            'next': None, # Placeholder: Add pagination logic if needed
+            'previous': None, # Placeholder: Add pagination logic if needed
+            'results': serialized_jobs
+        }
+        # If using JobSearchResultSerializer directly:
+        # result_serializer = JobSearchResultSerializer(search_result_data)
+        # return Response(result_serializer.data)
+        # For now, returning the dict directly to match existing structure, but ensuring fields align.
+        return Response(search_result_data)
 
 
 @extend_schema(

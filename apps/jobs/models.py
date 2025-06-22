@@ -286,25 +286,25 @@ class JobAlert(models.Model):
     user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='job_alerts')
     
     # Alert Configuration
-    name = models.CharField(max_length=100, help_text="Alert name for user reference")
-    keywords = models.JSONField(default=list, help_text="Keywords to search for")
-    location = models.CharField(max_length=100, blank=True)
-    job_type = models.CharField(max_length=20, choices=Job.JOB_TYPES, blank=True)
-    experience_level = models.CharField(max_length=20, choices=Job.EXPERIENCE_LEVELS, blank=True)
-    remote_only = models.BooleanField(default=False)
+    name = models.CharField(max_length=100, help_text="User-defined name for this job alert.")
+    keywords = models.JSONField(default=list, help_text="List of keywords or phrases to match in job titles or descriptions.")
+    location = models.CharField(max_length=100, blank=True, help_text="Desired job location (e.g., city, state, 'remote').")
+    job_type = models.CharField(max_length=20, choices=Job.JOB_TYPES, blank=True, help_text="Preferred employment type.")
+    experience_level = models.CharField(max_length=20, choices=Job.EXPERIENCE_LEVELS, blank=True, help_text="Preferred experience level.")
+    remote_only = models.BooleanField(default=False, help_text="If true, only include remote jobs.")
     
     # Salary preferences
-    min_salary = models.PositiveIntegerField(null=True, blank=True)
-    max_salary = models.PositiveIntegerField(null=True, blank=True)
+    min_salary = models.PositiveIntegerField(null=True, blank=True, help_text="Minimum desired salary (annualized).")
+    max_salary = models.PositiveIntegerField(null=True, blank=True, help_text="Maximum desired salary (annualized).")
     
     # Notification settings
-    frequency = models.CharField(max_length=20, choices=FREQUENCY_CHOICES, default='daily')
-    email_notifications = models.BooleanField(default=True)
-    push_notifications = models.BooleanField(default=False)
+    frequency = models.CharField(max_length=20, choices=FREQUENCY_CHOICES, default='daily', help_text="How often to send alert notifications.")
+    email_notifications = models.BooleanField(default=True, help_text="Enable email notifications for this alert.")
+    push_notifications = models.BooleanField(default=False, help_text="Enable push notifications for this alert (if supported).")
     
     # Status
-    is_active = models.BooleanField(default=True)
-    last_run = models.DateTimeField(null=True, blank=True)
+    is_active = models.BooleanField(default=True, help_text="Is this alert currently active and running?")
+    last_run = models.DateTimeField(null=True, blank=True, help_text="Timestamp of the last time this alert was processed.")
     
     # Tracking
     created_at = models.DateTimeField(auto_now_add=True)
