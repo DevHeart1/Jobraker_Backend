@@ -62,11 +62,77 @@ class VectorDocument(models.Model):
         """
         Helper method to update text content and embedding.
         """
+        # Ensure logger is available if this method is used more broadly
+        import logging
+        logger = logging.getLogger(__name__)
+
         self.text_content = new_text_content
         self.embedding = new_embedding
-        self.save() # updated_at will be set automatically
-        logger.info(f"Updated embedding for VectorDocument: {self.source_type}:{self.source_id}")
+        # self.save() # updated_at will be set automatically - call save where this method is used.
+        logger.info(f"Updated content and embedding for VectorDocument: {self.source_type}:{self.source_id} (pending save)")
 
-# It's good practice to import logger if used in model methods, though not strictly necessary for this definition.
-# import logging
-# logger = logging.getLogger(__name__)
+
+class KnowledgeArticle(models.Model):
+    """
+    Model for storing curated content like career advice articles, FAQs,
+    interview tips, etc., which can be used for RAG.
+    """
+    SOURCE_TYPE_CHOICES = [
+        ('career_advice', 'Career Advice'),
+        ('faq', 'Frequently Asked Question'),
+        ('interview_tips', 'Interview Tips'),
+        ('company_profile', 'Company Profile'), # Example, if we store general company info
+        ('industry_insight', 'Industry Insight'),
+        ('other', 'Other Curated Content'),
+    ]
+
+    id = models.BigAutoField(primary_key=True)
+    title = models.CharField(max_length=255, help_text="Title of the article or content piece.")
+    slug = models.SlugField(max_length=255, unique=True, help_text="URL-friendly slug for the article.")
+    content = models.TextField(help_text="Full text content of the article.")
+
+    source_type = models.CharField(
+        max_length=50,
+        choices=SOURCE_TYPE_CHOICES,
+        default='other',
+        db_index=True,
+        help_text="The type of curated content (e.g., 'career_advice', 'faq')."
+    )
+    category = models.CharField(
+        max_length=100,
+        null=True, blank=True,
+        db_index=True,
+        help_text="Optional category for organizing articles (e.g., 'Resume Writing', 'Job Search Strategies')."
+    )
+    tags = models.CharField(
+        max_length=255,
+        null=True, blank=True,
+        help_text="Comma-separated tags for findability (e.g., 'python, django, negotiation')."
+    )
+
+    is_active = models.BooleanField(
+        default=False,
+        db_index=True,
+        help_text="Only active articles will be processed for RAG and shown to users."
+    )
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        verbose_name = "Knowledge Article"
+        verbose_name_plural = "Knowledge Articles"
+        ordering = ['-updated_at', 'title']
+
+    def __str__(self):
+        return self.title
+
+    def get_tags_list(self) -> List[str]:
+        """Returns tags as a list of strings."""
+        if self.tags:
+            return [tag.strip() for tag in self.tags.split(',') if tag.strip()]
+        return []
+
+    # In a real application, the saving of this model would trigger
+    # a signal to embed its content and add/update it in the VectorDocument table.
+    # (This will be part of Phase 2 of this plan step)

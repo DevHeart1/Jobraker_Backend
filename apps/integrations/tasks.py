@@ -60,55 +60,109 @@ def fetch_adzuna_jobs(self, categories=None, max_days_old=1):
 
 
 @shared_task(bind=True, max_retries=3)
-def generate_job_embeddings(self, job_id):
+def generate_job_embeddings_and_ingest_for_rag(self, job_id: str):
     """
-    Generate AI embeddings for a job posting.
+    Generates AI embeddings for a job posting, saves them to the Job model,
+    and then ingests the job's content and combined_embedding into the RAG vector store.
     
     Args:
-        job_id: UUID of the job to process
+        job_id: UUID string of the job to process.
     """
     try:
         from apps.jobs.models import Job
-        from apps.integrations.services.openai import EmbeddingService
+        from apps.integrations.services.openai_service import EmbeddingService
+        from apps.common.services import VectorDBService
         
         job = Job.objects.get(id=job_id)
         embedding_service = EmbeddingService()
+        vector_db_service = VectorDBService()
         model_name = embedding_service.embedding_model # Get model name for labels
 
-        start_time = time.monotonic()
-        status = 'error'
+        # --- 1. Generate and Save Embeddings to Job Model ---
+        job_model_embedding_status = 'error'
+        job_embeddings_dict = None
         try:
-            # Generate embeddings
-            embeddings = embedding_service.generate_job_embeddings(job)
-            status = 'success' if embeddings else 'no_embeddings_generated' # More specific status
-        except Exception as e: # Catch errors from service call itself
-            logger.error(f"EmbeddingService call failed in generate_job_embeddings for job {job_id}: {e}")
-            raise # Re-raise to trigger Celery retry
+            emb_start_time = time.monotonic()
+            job_embeddings_dict = embedding_service.generate_job_embeddings(job)
+            job_model_embedding_status = 'success' if job_embeddings_dict else 'no_embeddings_generated'
+        except Exception as e:
+            logger.error(f"EmbeddingService call failed in generate_job_embeddings_and_ingest_for_rag for job {job_id}: {e}")
+            # Decide if to retry or just log and fail this part. For now, let it propagate to task retry.
+            raise
         finally:
-            duration = time.monotonic() - start_time
-            OPENAI_API_CALL_DURATION_SECONDS.labels(type='embedding_job', model=model_name).observe(duration)
-            # Status here reflects the outcome of the service call, not necessarily the overall task if db save fails
-            OPENAI_API_CALLS_TOTAL.labels(type='embedding_job', model=model_name, status=status).inc()
+            emb_duration = time.monotonic() - emb_start_time
+            OPENAI_API_CALL_DURATION_SECONDS.labels(type='embedding_job', model=model_name).observe(emb_duration)
+            OPENAI_API_CALLS_TOTAL.labels(type='embedding_job', model=model_name, status=job_model_embedding_status).inc()
 
-        if embeddings:
-            # Update job with embeddings
-            if 'title_embedding' in embeddings:
-                job.title_embedding = embeddings['title_embedding']
-            if 'combined_embedding' in embeddings:
-                job.combined_embedding = embeddings['combined_embedding']
+        rag_ingested_successfully = False
+        if job_embeddings_dict and 'combined_embedding' in job_embeddings_dict:
+            if 'title_embedding' in job_embeddings_dict: # Save title embedding if present
+                job.title_embedding = job_embeddings_dict['title_embedding']
+            job.combined_embedding = job_embeddings_dict['combined_embedding'] # This is used for RAG
             
-            job.save(update_fields=['title_embedding', 'combined_embedding'])
-            logger.info(f"Generated embeddings for job: {job.title}")
-            return {'status': 'success', 'job_id': str(job_id)}
-        else:
-            logger.warning(f"No embeddings generated for job: {job.title}")
-            return {'status': 'no_embeddings', 'job_id': str(job_id)}
+            try:
+                job.save(update_fields=['title_embedding', 'combined_embedding'])
+                logger.info(f"Saved embeddings to Job model for job_id: {job_id}")
+            except Exception as e:
+                logger.error(f"Failed to save embeddings to Job model {job_id}: {e}")
+                # Continue to RAG ingestion if combined_embedding is available, but log this error.
+
+            # --- 2. Ingest Job Content into RAG Vector Store ---
+            # Prepare text content for RAG
+            rag_text_content = (
+                f"Job Title: {job.title or 'N/A'}\n"
+                f"Company: {job.company or 'N/A'}\n"
+                f"Location: {job.location or 'N/A'}\n"
+                f"Type: {job.get_job_type_display() or 'N/A'}\n" # Use display value for job_type
+                f"Description: {job.description or 'N/A'}"
+            )
+            # Add salary if available and makes sense for RAG search context
+            if job.salary_min and job.salary_max:
+                rag_text_content += f"\nSalary Range: ${job.salary_min} - ${job.salary_max}"
+            elif job.salary_min:
+                rag_text_content += f"\nSalary Min: ${job.salary_min}"
+
+
+            metadata_for_rag = {
+                'job_id_original': str(job.id), # Keep original job ID for reference
+                'company': job.company,
+                'location': job.location,
+                'posted_date': str(job.posted_date.isoformat() if job.posted_date else None),
+                'job_type': job.job_type, # Store the key, not display value, for potential filtering
+                'title': job.title, # Useful for display with RAG results
+                # Add any other filterable/useful metadata, e.g., from job.tags if it exists
+            }
+
+            # Delete existing RAG document for this job_id to ensure freshness
+            # This uses source_id which is str(job.id) for 'job_listing' type
+            vector_db_service.delete_documents(source_type='job_listing', source_id=str(job.id))
+
+            add_status = vector_db_service.add_documents(
+                texts=[rag_text_content],
+                embeddings=[job_embeddings_dict['combined_embedding']], # Use the combined embedding
+                source_types=['job_listing'],
+                source_ids=[str(job.id)],
+                metadatas=[metadata_for_rag]
+            )
+            if add_status:
+                rag_ingested_successfully = True
+                logger.info(f"Successfully added/updated job {job.id} in RAG vector store.")
+            else:
+                logger.error(f"Failed to add/update job {job.id} in RAG vector store.")
+
+            return {'status': 'success', 'job_id': str(job_id), 'embeddings_saved_to_job': True, 'rag_ingested': rag_ingested_successfully}
+
+        else: # No embeddings generated
+            logger.warning(f"No embeddings generated for job: {job.title}, RAG ingestion skipped.")
+            return {'status': 'no_embeddings', 'job_id': str(job_id), 'embeddings_saved_to_job': False, 'rag_ingested': False}
             
     except Job.DoesNotExist:
         logger.error(f"Job not found: {job_id}")
+        # OPENAI_API_CALLS_TOTAL.labels(type='embedding_job', model='N/A', status='prereq_not_found').inc() # Covered by job_model_embedding_status if needed
         return {'status': 'job_not_found', 'job_id': str(job_id)}
     except Exception as exc:
-        logger.error(f"Error generating embeddings for job {job_id}: {exc}")
+        logger.error(f"Error in generate_job_embeddings_and_ingest_for_rag for job {job_id}: {exc}")
+        # OPENAI_API_CALLS_TOTAL.labels(type='embedding_job', model='N/A', status='task_error').inc() # Covered by job_model_embedding_status
         raise self.retry(exc=exc, countdown=60 * (2 ** self.request.retries))
 
 
@@ -186,11 +240,11 @@ def batch_generate_job_embeddings(self, limit=50):
         
         processed = 0
         for job in jobs_without_embeddings:
-            # Queue individual embedding task
-            generate_job_embeddings.delay(str(job.id))
+            # Queue individual embedding task (now renamed)
+            generate_job_embeddings_and_ingest_for_rag.delay(str(job.id))
             processed += 1
         
-        logger.info(f"Queued embedding generation for {processed} jobs")
+        logger.info(f"Queued embedding generation and RAG ingestion for {processed} jobs")
         return {'status': 'queued', 'count': processed}
         
     except Exception as exc:
@@ -462,44 +516,43 @@ def get_openai_job_advice_task(self, user_id: int, advice_type: str, context: st
         if text_for_rag_embedding:
             try:
                 from apps.integrations.services.openai_service import EmbeddingService
-                from apps.common.vector_db_service import VectorDBService # Conceptual
+                from apps.common.services import VectorDBService # Using actual service path
 
                 embedding_service = EmbeddingService()
-                vdb_service = VectorDBService()
+                vdb_service = VectorDBService() # Service with implemented ORM logic
 
                 query_embedding_list = embedding_service.generate_embeddings([text_for_rag_embedding])
                 if query_embedding_list and query_embedding_list[0]:
                     query_embedding = query_embedding_list[0]
-                    # Example: Filter RAG search by source_type if relevant to advice_type
+
                     rag_filter = None
-                    if advice_type in ["resume", "interview", "application"]:
-                        rag_filter = {'source_type': 'career_article'} # Fetch general advice articles
-                    elif advice_type == "salary":
-                         rag_filter = {'source_type': 'salary_data_source'} # Hypothetical source type
+                    if advice_type == "salary":
+                        rag_filter = {'source_type__in': ['job_listing', 'salary_data_article']} # Example source types
+                    elif advice_type in ["resume", "interview", "application", "skills", "networking"]:
+                        rag_filter = {'source_type__in': ['career_article', 'faq_item']} # Example source types
 
-                    similar_docs = vdb_service.search_similar_documents(query_embedding, top_n=3, filter_criteria=rag_filter)
-
-                    if similar_docs:
-                        rag_context_parts = ["Here is some relevant information to consider:"]
-                        for doc in similar_docs:
-                            rag_context_parts.append(f"- {doc.get('text_content', '')} (Source: {doc.get('source_type', 'N/A')})")
-                        rag_context_str = "\n".join(rag_context_parts)
-                        logger.info(f"RAG: Successfully retrieved and formatted {len(similar_docs)} documents for advice task.")
-                else:
-                    logger.warning("RAG: Could not generate query embedding for advice task.")
-            except Exception as e:
-                logger.error(f"RAG pipeline error in get_openai_job_advice_task: {e}")
-        # --- End RAG Implementation ---
-
+                    logger.info(f"RAG: Searching documents for advice_type '{advice_type}' with filter: {rag_filter}")
+                    similar_docs = vdb_service.search_similar_documents(
+                        query_embedding=query_embedding,
+                        top_n=3,
+                        filter_criteria=rag_filter
+                    )
 
                     if similar_docs:
                         rag_context_parts = ["--- Start of Retrieved Information ---"]
                         for i, doc in enumerate(similar_docs):
-                            doc_info = f"Document {i+1} (Source: {doc.get('source_type', 'N/A')}, ID: {doc.get('source_id', 'N/A')}):"
+                            doc_info = (
+                                f"Retrieved Document {i+1} "
+                                f"(Source Type: {doc.get('source_type', 'N/A')}, "
+                                f"Source ID: {doc.get('source_id', 'N/A')}, " # Useful for debugging/tracing
+                                f"Similarity: {doc.get('similarity_score', 0.0):.3f}):" # Display score
+                            )
                             rag_context_parts.append(f"{doc_info}\n{doc.get('text_content', '')}")
                         rag_context_parts.append("--- End of Retrieved Information ---")
                         rag_context_str = "\n\n".join(rag_context_parts)
-                        logger.info(f"RAG: Successfully retrieved and formatted {len(similar_docs)} documents for advice task.")
+                        logger.info(f"RAG: Retrieved and formatted {len(similar_docs)} documents for advice task.")
+                    else:
+                        logger.info("RAG: No similar documents found for advice task.")
                 else:
                     logger.warning("RAG: Could not generate query embedding for advice task.")
             except Exception as e:
@@ -581,38 +634,45 @@ def get_openai_chat_response_task(self, user_id: int, message: str, conversation
         if message: # Use the user's message for RAG query
             try:
                 from apps.integrations.services.openai_service import EmbeddingService
-                from apps.common.vector_db_service import VectorDBService # Conceptual
+                from apps.common.services import VectorDBService # Using actual service path
 
                 embedding_service = EmbeddingService()
-                vdb_service = VectorDBService()
+                vdb_service = VectorDBService() # Service with implemented ORM logic
 
                 query_embedding_list = embedding_service.generate_embeddings([message])
                 if query_embedding_list and query_embedding_list[0]:
                     query_embedding = query_embedding_list[0]
-                    # Generic search for chat, could be refined with intent detection later
-                    similar_docs = vdb_service.search_similar_documents(query_embedding, top_n=3)
 
-                    if similar_docs:
-                        rag_context_parts = ["Here is some relevant information to consider:"]
-                        for doc in similar_docs:
-                            rag_context_parts.append(f"- {doc.get('text_content', '')} (Source: {doc.get('source_type', 'N/A')})")
-                        rag_context_str = "\n".join(rag_context_parts)
-                        logger.info(f"RAG: Successfully retrieved and formatted {len(similar_docs)} documents for chat task.")
-                else:
-                    logger.warning("RAG: Could not generate query embedding for chat task.")
-            except Exception as e:
-                logger.error(f"RAG pipeline error in get_openai_chat_response_task: {e}")
-        # --- End RAG Implementation ---
+                    # For chat, a generic search might be okay, or we can add simple keyword-based filters.
+                    # Example: if user asks about "jobs" or "roles", prioritize 'job_listing' source_type.
+                    rag_filter = None
+                    if "job" in message.lower() or "role" in message.lower() or "position" in message.lower():
+                        rag_filter = {'source_type': 'job_listing'}
+                    elif "interview" in message.lower() or "resume" in message.lower():
+                        rag_filter = {'source_type__in': ['career_article', 'faq_item']}
 
+                    logger.info(f"RAG: Searching documents for chat message with filter: {rag_filter}")
+                    similar_docs = vdb_service.search_similar_documents(
+                        query_embedding=query_embedding,
+                        top_n=3,
+                        filter_criteria=rag_filter
+                    )
 
                     if similar_docs:
                         rag_context_parts = ["--- Start of Retrieved Context ---"]
                         for i, doc in enumerate(similar_docs):
-                            doc_info = f"Context Item {i+1} (Source: {doc.get('source_type', 'N/A')}, ID: {doc.get('source_id', 'N/A')}):"
+                            doc_info = (
+                                f"Retrieved Context Item {i+1} "
+                                f"(Source Type: {doc.get('source_type', 'N/A')}, "
+                                f"Source ID: {doc.get('source_id', 'N/A')}, "
+                                f"Similarity: {doc.get('similarity_score', 0.0):.3f}):"
+                            )
                             rag_context_parts.append(f"{doc_info}\n{doc.get('text_content', '')}")
                         rag_context_parts.append("--- End of Retrieved Context ---")
                         rag_context_str = "\n\n".join(rag_context_parts)
-                        logger.info(f"RAG: Successfully retrieved and formatted {len(similar_docs)} documents for chat task.")
+                        logger.info(f"RAG: Retrieved and formatted {len(similar_docs)} documents for chat task using functional VectorDBService.")
+                    else:
+                        logger.info("RAG: No similar documents found for chat task.")
                 else:
                     logger.warning("RAG: Could not generate query embedding for chat task.")
             except Exception as e:
@@ -941,3 +1001,84 @@ def retrieve_skyvern_task_results_task(self, skyvern_task_id: str, application_i
     except Exception as exc:
         logger.error(f"Error retrieving results for Skyvern task {skyvern_task_id}: {exc}")
         raise self.retry(exc=exc)
+
+
+# --- Task for KnowledgeArticle RAG Ingestion ---
+@shared_task(bind=True, max_retries=3)
+def process_knowledge_article_for_rag_task(self, article_id: int):
+    """
+    Generates embedding for a KnowledgeArticle and ingests/updates it in the RAG vector store.
+    Args:
+        article_id: ID of the KnowledgeArticle to process.
+    """
+    try:
+        from apps.common.models import KnowledgeArticle
+        from apps.integrations.services.openai_service import EmbeddingService
+        from apps.common.services import VectorDBService
+
+        article = KnowledgeArticle.objects.get(id=article_id)
+
+        if not article.is_active:
+            logger.info(f"KnowledgeArticle {article_id} is not active. Deleting from RAG store if present.")
+            vector_db_service = VectorDBService()
+            vector_db_service.delete_documents(source_type=article.source_type, source_id=str(article.id))
+            return {'status': 'skipped_inactive_deleted', 'article_id': article_id}
+
+        embedding_service = EmbeddingService()
+        vector_db_service = VectorDBService()
+        model_name = embedding_service.embedding_model # For metrics
+
+        text_to_embed = f"Title: {article.title}\nContent: {article.content}"
+
+        embedding_generation_status = 'error'
+        article_embedding_list = None
+        try:
+            emb_start_time = time.monotonic()
+            article_embedding_list = embedding_service.generate_embeddings([text_to_embed])
+            embedding_generation_status = 'success' if article_embedding_list and article_embedding_list[0] else 'no_embedding_generated'
+        except Exception as e:
+            logger.error(f"EmbeddingService call failed for KnowledgeArticle {article_id}: {e}")
+            raise # Re-raise to trigger Celery retry
+        finally:
+            emb_duration = time.monotonic() - emb_start_time
+            OPENAI_API_CALL_DURATION_SECONDS.labels(type=f'embedding_knowledge_{article.source_type}', model=model_name).observe(emb_duration)
+            OPENAI_API_CALLS_TOTAL.labels(type=f'embedding_knowledge_{article.source_type}', model=model_name, status=embedding_generation_status).inc()
+
+        if article_embedding_list and article_embedding_list[0]:
+            article_embedding = article_embedding_list[0]
+
+            metadata_for_rag = {
+                'article_id_original': str(article.id),
+                'title': article.title,
+                'category': article.category,
+                'tags': article.get_tags_list(), # Store as list
+                'source_type_display': article.get_source_type_display() # Store display name
+            }
+
+            # Delete existing RAG document for this article_id to ensure freshness
+            vector_db_service.delete_documents(source_type=article.source_type, source_id=str(article.id))
+
+            add_status = vector_db_service.add_documents(
+                texts=[text_to_embed], # Could also store just article.content if title is only for metadata
+                embeddings=[article_embedding],
+                source_types=[article.source_type], # Use the article's own source_type
+                source_ids=[str(article.id)],
+                metadatas=[metadata_for_rag]
+            )
+
+            if add_status:
+                logger.info(f"Successfully processed and ingested KnowledgeArticle {article.id} ('{article.title}') for RAG.")
+                return {'status': 'success', 'article_id': article_id, 'rag_ingested': True}
+            else:
+                logger.error(f"Failed to add/update KnowledgeArticle {article.id} in RAG vector store.")
+                return {'status': 'rag_add_failed', 'article_id': article_id, 'rag_ingested': False}
+        else:
+            logger.warning(f"No embedding generated for KnowledgeArticle {article.id}, RAG ingestion skipped.")
+            return {'status': 'no_embedding', 'article_id': article_id, 'rag_ingested': False}
+
+    except KnowledgeArticle.DoesNotExist:
+        logger.error(f"KnowledgeArticle not found: {article_id}")
+        return {'status': 'article_not_found', 'article_id': article_id}
+    except Exception as exc:
+        logger.error(f"Error processing KnowledgeArticle {article_id} for RAG: {exc}")
+        raise self.retry(exc=exc, countdown=60 * (2 ** self.request.retries))
