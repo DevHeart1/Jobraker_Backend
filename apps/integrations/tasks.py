@@ -774,11 +774,82 @@ def analyze_openai_resume_task(self, resume_text: str, target_job: str = "", use
         api_key = getattr(settings, 'OPENAI_API_KEY', '')
         model = getattr(settings, 'OPENAI_MODEL', 'gpt-4')
 
-        # Simplified prompt building
-        prompt = f"Analyze this resume: {resume_text[:200]}... for target job: {target_job}."
-        if user_profile_data:
-             prompt += f"\nUser profile context: {user_profile_data.get('experience_level', 'N/A')}"
+        # --- RAG Implementation for Resume Analysis ---
+        rag_context_str = ""
+        if target_job: # Only fetch RAG context if a target job is specified
+            try:
+                from apps.integrations.services.openai_service import EmbeddingService
+                from apps.common.services import VectorDBService
 
+                embedding_service = EmbeddingService()
+                vdb_service = VectorDBService()
+
+                # Embed the target_job description (or a summary/keywords from it)
+                # For simplicity, embedding the whole target_job string if it's mostly a description.
+                query_embedding_list = embedding_service.generate_embeddings([target_job])
+
+                if query_embedding_list and query_embedding_list[0]:
+                    query_embedding = query_embedding_list[0]
+
+                    # Search for KnowledgeArticles related to resume writing or general career advice
+                    rag_filter = {'source_type__in': ['career_advice', 'faq_item', 'interview_tips'],
+                                  'metadata__category__icontains': 'resume'} # Example filter
+                    # Or search for articles tagged with 'resume' or 'cv'
+                    # rag_filter = {'metadata__tags__overlap': ['resume', 'cv_writing']}
+
+                    logger.info(f"RAG (ResumeAnalysis): Searching documents with filter: {rag_filter}")
+                    similar_docs = vdb_service.search_similar_documents(
+                        query_embedding=query_embedding,
+                        top_n=2, # Fetch 1-2 relevant advice articles
+                        filter_criteria=rag_filter
+                    )
+
+                    if similar_docs:
+                        rag_context_parts = ["--- Start: Relevant Resume Writing Advice ---"]
+                        for i, doc in enumerate(similar_docs):
+                            doc_info = (
+                                f"Advice Article {i+1} "
+                                f"(Source: {doc.get('source_type', 'N/A')}, "
+                                f"Similarity to target job: {doc.get('similarity_score', 0.0):.3f}):"
+                            )
+                            rag_context_parts.append(f"{doc_info}\n{doc.get('text_content', '')}")
+                        rag_context_parts.append("--- End: Relevant Resume Writing Advice ---")
+                        rag_context_str = "\n\n".join(rag_context_parts)
+                        logger.info(f"RAG (ResumeAnalysis): Retrieved {len(similar_docs)} advice articles.")
+                    else:
+                        logger.info("RAG (ResumeAnalysis): No relevant advice articles found.")
+                else:
+                    logger.warning("RAG (ResumeAnalysis): Could not generate query embedding for target_job.")
+            except Exception as e:
+                logger.error(f"RAG pipeline error in analyze_openai_resume_task: {e}")
+        # --- End RAG Implementation ---
+
+        # Refined prompt building
+        prompt_parts = [
+            "Please analyze the following resume and provide specific improvement suggestions.",
+            f"\nResume Content:\n---\n{resume_text}\n---"
+        ]
+        if target_job:
+            prompt_parts.append(f"\nThe resume is being tailored for the following Target Job (or job type):\n---\n{target_job}\n---")
+        if user_profile_data: # Add user profile context if available
+            user_exp = user_profile_data.get('experience_level', 'N/A')
+            user_skills = ", ".join(user_profile_data.get('skills', [])) or "N/A"
+            prompt_parts.append(f"\nUser Profile Context: Experience Level: {user_exp}, Skills: {user_skills}.")
+
+        if rag_context_str:
+            prompt_parts.append(f"\nConsider the following general resume advice when formulating your feedback, if relevant:")
+            prompt_parts.append(rag_context_str)
+
+        prompt_parts.append(f"""
+Please structure your feedback to include:
+1. Overall Assessment and Key Strengths: (General impression and what the resume does well)
+2. Specific Areas for Improvement related to the Resume Content: (Actionable feedback on sections, wording, impact statements)
+3. Tailoring for Target Job (if specified): (How to better align with the target job description/type)
+4. Missing Skills or Experience to Highlight (if applicable based on target job):
+5. Formatting and Structure Suggestions: (Readability, ATS compatibility)
+6. Keyword Optimization: (Suggestions for incorporating relevant keywords, especially for ATS)""")
+
+        prompt = "\n\n".join(prompt_parts)
 
         if not api_key:
             logger.warning("OpenAI API key not configured for task: analyze_openai_resume_task")
