@@ -64,3 +64,109 @@ def batch_generate_recommendations_for_active_users_task(self):
 
     logger.info(f"Batch recommendations: Attempted to queue for {processed_count} users. Successfully queued: {queued_count} tasks.")
     return {"status": "batch_queued", "total_profiles_considered": processed_count, "tasks_queued": queued_count}
+
+
+@shared_task(bind=True, max_retries=3)
+def process_job_alerts_task(self):
+    """
+    Processes all active job alerts, finds matching new jobs,
+    and triggers notifications for users.
+    """
+    from apps.jobs.models import Job, JobAlert
+    from django.db.models import Q
+    from django.utils import timezone
+
+    active_alerts = JobAlert.objects.filter(is_active=True)
+    if not active_alerts.exists():
+        logger.info("No active job alerts to process.")
+        return {"status": "no_active_alerts", "processed_alerts": 0}
+
+    alerts_processed_count = 0
+    notifications_sent_count = 0
+
+    for alert in active_alerts:
+        logger.info(f"Processing job alert ID: {alert.id} for user: {alert.user_id}")
+
+        job_filters = Q()
+
+        # Time filter: only new jobs since last run, or in last 24h if no last_run
+        if alert.last_run:
+            job_filters &= Q(created_at__gt=alert.last_run) # Or use job.posted_date
+        else:
+            # For the very first run of an alert, look back a reasonable period, e.g., 1 day.
+            job_filters &= Q(created_at__gte=timezone.now() - timezone.timedelta(days=1))
+
+        # Keyword filter (search in title and description)
+        if alert.keywords:
+            keyword_query = Q()
+            for kw in alert.keywords: # Assuming alert.keywords is a list of strings
+                keyword_query |= Q(title__icontains=kw) | Q(description__icontains=kw)
+            if keyword_query: # Only add if there were keywords
+                job_filters &= keyword_query
+
+        # Location filter
+        if alert.location:
+            job_filters &= Q(location__icontains=alert.location)
+
+        # Job type filter
+        if alert.job_type:
+            job_filters &= Q(job_type=alert.job_type)
+
+        # Experience level filter
+        if alert.experience_level:
+            job_filters &= Q(experience_level=alert.experience_level)
+
+        # Remote only filter
+        if alert.remote_only:
+            job_filters &= Q(is_remote=True)
+
+        # Min salary filter
+        if alert.min_salary is not None: # Check for None as 0 is a valid salary
+            job_filters &= Q(salary_min__gte=alert.min_salary) | Q(salary_max__gte=alert.min_salary) # Job's max can meet user's min
+
+        # --- Find matching jobs ---
+        try:
+            matching_jobs = Job.objects.filter(job_filters, status='active').distinct()
+
+            if not matching_jobs.exists():
+                logger.info(f"No new matching jobs found for alert ID: {alert.id}")
+
+            for job in matching_jobs:
+                # --- Prevent Duplicate Notifications (Conceptual/Placeholder) ---
+                # In a real system, you'd check if this user has already been notified for this job via this alert.
+                # Example: if NotifiedAlertMatch.objects.filter(user=alert.user, job=job, job_alert=alert).exists():
+                # continue
+                # For now, we assume each found job is a new notification.
+                # --- End Conceptual Duplicate Prevention ---
+
+                logger.info(f"MATCH FOUND: Alert ID {alert.id} for user {alert.user.id} matched Job ID {job.id} ('{job.title}')")
+
+                # --- Trigger Notification (Conceptual) ---
+                # This would typically involve creating a Notification object in the DB
+                # and/or queuing another task to send email/push.
+                # from apps.notifications.services import NotificationService # Example
+                # NotificationService.create_notification(
+                # user=alert.user,
+                # message_type='job_alert',
+                # content=f"New job matching your alert '{alert.name}': {job.title} at {job.company}",
+                # related_object=job
+                # )
+                logger.info(f"  -> Conceptual notification triggered for user {alert.user.id}, job {job.id}, alert '{alert.name}'.")
+                notifications_sent_count += 1
+                # --- End Conceptual Notification Trigger ---
+
+            # Update last_run timestamp for the alert
+            alert.last_run = timezone.now()
+            alert.save(update_fields=['last_run'])
+            alerts_processed_count += 1
+
+        except Exception as e:
+            logger.error(f"Error processing jobs for alert ID {alert.id}: {e}")
+            # Continue to next alert, or re-raise if critical
+
+    logger.info(f"Finished processing job alerts. Processed: {alerts_processed_count} alerts. Conceptual notifications sent: {notifications_sent_count}.")
+    return {
+        "status": "completed",
+        "processed_alerts": alerts_processed_count,
+        "notifications_triggered": notifications_sent_count
+    }
