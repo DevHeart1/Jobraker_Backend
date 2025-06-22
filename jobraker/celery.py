@@ -50,6 +50,10 @@ app.conf.beat_schedule = {
         'schedule': 86400.0,  # Run daily (24 * 60 * 60 seconds)
         # 'args': (), # Add any default arguments if needed
     },
+    'process-job-alerts': {
+        'task': 'apps.jobs.tasks.process_job_alerts_task',
+        'schedule': 1800.0,  # Run every 30 minutes (30 * 60 seconds)
+    },
 }
 
 @app.task(bind=True)
