@@ -80,13 +80,166 @@ class WebhookView(APIView):
             # TODO: Handle Adzuna webhooks
             return Response({'message': 'Adzuna webhook received'})
         elif service == 'skyvern':
-            # TODO: Handle Skyvern webhooks
-            return Response({'message': 'Skyvern webhook received'})
+            return self._handle_skyvern_webhook(request)
         else:
             return Response(
                 {'error': 'Unknown service'}, 
                 status=status.HTTP_400_BAD_REQUEST
             )
+
+    def _verify_skyvern_webhook_signature(self, request):
+        """
+        Placeholder for Skyvern webhook signature verification.
+        """
+        # from django.conf import settings
+        # import hmac # For actual signature verification
+        # import hashlib
+        #
+        # skyvern_signature = request.headers.get('X-Skyvern-Signature') # Example header
+        # shared_secret = getattr(settings, 'SKYVERN_WEBHOOK_SECRET', None)
+        #
+        # if not skyvern_signature or not shared_secret:
+        #     logger.warning("Skyvern webhook: Missing signature or shared secret for verification.")
+        #     return False # Fail if essential components are missing for verification
+        #
+        # payload_body = request.body
+        # # Example: `calculated_signature = hmac.new(shared_secret.encode(), payload_body, hashlib.sha256).hexdigest()`
+        # # if not hmac.compare_digest(calculated_signature, skyvern_signature):
+        # #     logger.warning("Skyvern webhook: Invalid signature.")
+        # #     return False
+        #
+        # logger.info("Skyvern webhook: Signature (placeholder) verified.")
+        # return True
+
+        from django.conf import settings
+        import hmac
+        import hashlib
+
+        skyvern_signature_header = request.headers.get('X-Skyvern-Signature') # Common header, confirm with Skyvern docs
+        shared_secret = getattr(settings, 'SKYVERN_WEBHOOK_SECRET', None)
+
+        if not skyvern_signature_header:
+            logger.warning("Skyvern webhook: Missing 'X-Skyvern-Signature' header.")
+            return False
+
+        if not shared_secret:
+            logger.error("Skyvern webhook: SKYVERN_WEBHOOK_SECRET is not configured in settings. Cannot verify signature.")
+            # In a production system, you might want to return False here to block unverified webhooks.
+            # For debugging or if an insecure mode is explicitly desired for dev, one might allow it,
+            # but it's a security risk. Defaulting to secure: verification fails if secret is missing.
+            return False
+
+        payload_body = request.body # Raw body bytes
+
+        try:
+            # Calculate the expected signature
+            expected_signature = hmac.new(
+                shared_secret.encode('utf-8'),
+                payload_body,
+                hashlib.sha256
+            ).hexdigest()
+
+            # Securely compare the signatures
+            if hmac.compare_digest(expected_signature, skyvern_signature_header):
+                logger.info("Skyvern webhook: Signature verified successfully.")
+                return True
+            else:
+                logger.warning(f"Skyvern webhook: Invalid signature. Header: {skyvern_signature_header}, Calculated: {expected_signature}")
+                return False
+        except Exception as e:
+            logger.error(f"Skyvern webhook: Error during signature verification: {e}")
+            return False
+
+    def _handle_skyvern_webhook(self, request):
+        """
+        Handles incoming webhooks from Skyvern.
+        Updates the corresponding Application model instance.
+        """
+        import json # Moved import here
+        from django.utils import timezone
+        from apps.jobs.models import Application # Ensure this path is correct
+        # from .tasks import retrieve_skyvern_task_results_task # If needed
+
+        logger = logging.getLogger(__name__) # Ensure logger is defined or passed
+
+        if not self._verify_skyvern_webhook_signature(request): # Self is needed for instance method
+            return Response({"error": "Invalid signature."}, status=status.HTTP_403_FORBIDDEN)
+
+        try:
+            payload = json.loads(request.body.decode('utf-8'))
+            logger.info(f"Received Skyvern webhook payload: {payload}")
+        except json.JSONDecodeError:
+            logger.error("Skyvern webhook: Invalid JSON payload.")
+            return Response({"error": "Invalid JSON payload."}, status=status.HTTP_400_BAD_REQUEST)
+
+        skyvern_task_id = payload.get("task_id")
+        skyvern_status = payload.get("status")
+        skyvern_data = payload.get("data")
+        skyvern_error_details = payload.get("error_details")
+
+        if not skyvern_task_id or not skyvern_status:
+            logger.error(f"Skyvern webhook: Missing task_id or status in payload: {payload}")
+            return Response({"error": "Missing task_id or status."}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            application = Application.objects.get(skyvern_task_id=skyvern_task_id)
+        except Application.DoesNotExist:
+            logger.warning(f"Skyvern webhook: Update for unknown Skyvern task_id {skyvern_task_id}. No matching application.")
+            return Response({"message": "Webhook for unknown task_id received."}, status=status.HTTP_200_OK)
+        except Application.MultipleObjectsReturned:
+            logger.error(f"Skyvern webhook: Multiple applications for Skyvern task_id {skyvern_task_id}. Critical error.")
+            return Response({"error": "Internal error: multiple applications for task_id."}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+        logger.info(f"Processing Skyvern webhook for AppID: {application.id}, SkyvernTaskID: {skyvern_task_id}, SkyvernStatus: {skyvern_status}")
+
+        original_app_status = application.status
+        new_app_status = original_app_status
+        fields_to_update = ['updated_at']
+        response_changed_application = False
+
+        current_response_data = application.skyvern_response_data or {}
+
+        if skyvern_status == "COMPLETED":
+            new_app_status = 'submitted'
+            if not application.applied_at:
+                application.applied_at = timezone.now()
+                fields_to_update.append('applied_at')
+            current_response_data.update(skyvern_data or {}) # Merge new data
+            application.skyvern_response_data = current_response_data
+            fields_to_update.append('skyvern_response_data')
+        elif skyvern_status == "FAILED":
+            new_app_status = 'skyvern_submission_failed'
+            current_response_data.update(skyvern_error_details or skyvern_data or {"error": "Task failed as per webhook."})
+            application.skyvern_response_data = current_response_data
+            fields_to_update.append('skyvern_response_data')
+        elif skyvern_status == "CANCELED":
+            new_app_status = 'skyvern_canceled'
+            current_response_data.update({"status_reason": "canceled", "details": skyvern_data or skyvern_error_details})
+            application.skyvern_response_data = current_response_data
+            fields_to_update.append('skyvern_response_data')
+        elif skyvern_status == "REQUIRES_ATTENTION":
+            new_app_status = 'skyvern_requires_attention'
+            current_response_data.update(skyvern_data or skyvern_error_details or {"status_reason": "requires_attention"})
+            application.skyvern_response_data = current_response_data
+            fields_to_update.append('skyvern_response_data')
+        elif skyvern_status in ["PENDING", "RUNNING"]:
+            if application.status not in ['submitting_via_skyvern']:
+                new_app_status = 'submitting_via_skyvern'
+        else:
+            logger.warning(f"Skyvern webhook: Unhandled Skyvern status '{skyvern_status}' for task {skyvern_task_id}.")
+
+        if new_app_status != original_app_status or 'applied_at' in fields_to_update or 'skyvern_response_data' in fields_to_update:
+            application.status = new_app_status
+            if 'status' not in fields_to_update: fields_to_update.append('status')
+
+            fields_to_update = list(set(fields_to_update)) # Ensure unique fields
+            application.save(update_fields=fields_to_update)
+            response_changed_application = True
+            logger.info(f"Application {application.id} updated via webhook. Status: {original_app_status} -> {new_app_status}.")
+        else:
+            logger.info(f"Application {application.id} status ({original_app_status}) effectively unchanged by Skyvern webhook status {skyvern_status}.")
+
+        return Response({"message": "Webhook processed.", "application_updated": response_changed_application})
 
 
 @extend_schema(

@@ -157,16 +157,20 @@ class Application(models.Model):
     """Job application tracking model."""
     
     STATUS_CHOICES = [
-        ('pending', 'Pending'),
-        ('submitted', 'Submitted'),
-        ('under_review', 'Under Review'),
+        ('pending', 'Pending'),                           # Initial state before any action
+        ('submitting_via_skyvern', 'Submitting via Skyvern'), # Skyvern task initiated
+        ('submitted', 'Submitted'),                       # Successfully submitted (by Skyvern or manually)
+        ('under_review', 'Under Review'),                 # Application is being reviewed by employer
         ('interview_scheduled', 'Interview Scheduled'),
         ('interview_completed', 'Interview Completed'),
         ('offer_received', 'Offer Received'),
         ('accepted', 'Accepted'),
         ('rejected', 'Rejected'),
-        ('withdrawn', 'Withdrawn'),
-        ('failed', 'Failed to Submit'),
+        ('withdrawn', 'Withdrawn'),                       # User withdrew application
+        ('failed_to_submit', 'Failed to Submit'),         # Generic submission failure (manual or other)
+        ('skyvern_submission_failed', 'Skyvern Submission Failed'), # Skyvern explicitly failed
+        ('skyvern_canceled', 'Skyvern Task Canceled'),        # Skyvern task was canceled
+        ('skyvern_requires_attention', 'Skyvern Task Requires Attention'), # Skyvern needs input/action
     ]
     
     APPLICATION_TYPES = [
@@ -210,8 +214,9 @@ class Application(models.Model):
     follow_up_date = models.DateTimeField(null=True, blank=True)
     
     # External Integration Data
-    skyvern_task_id = models.CharField(max_length=100, blank=True)
-    submission_logs = models.JSONField(default=list, help_text="Application submission logs")
+    skyvern_task_id = models.CharField(max_length=100, blank=True, db_index=True, help_text="Task ID from Skyvern for auto-applications.")
+    skyvern_response_data = models.JSONField(null=True, blank=True, help_text="Raw response data from Skyvern task results (e.g., confirmation, errors).")
+    submission_logs = models.JSONField(default=list, help_text="Application submission logs (can include Skyvern logs or manual entries).")
     
     # Notes and Feedback
     notes = models.TextField(blank=True)
