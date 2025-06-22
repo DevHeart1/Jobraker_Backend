@@ -227,4 +227,184 @@ if __name__ == '__main__':
     # and Django settings are minimally configured for model imports,
     # or if all Django dependencies are mocked out.
     # For full Django integration, use `python manage.py test apps.common`
+    # unittest.main() # Comment out when running as part of Django test suite
+
+
+# Placeholder for Skyvern tests if they are to be in this file.
+# It's generally better to have separate test files per service if they grow large.
+# For now, adding here as per plan "add to existing for now".
+
+import requests # Added for requests.exceptions used in MockSkyvernResponse
+from unittest.mock import patch as skyvern_patch, MagicMock as SkyvernMagicMock, call as skyvern_call
+
+
+# Assuming SkyvernAPIClient is in apps.integrations.services.skyvern
+# from apps.integrations.services.skyvern import SkyvernAPIClient
+
+class MockSkyvernResponse:
+    def __init__(self, status_code, json_data=None, text_data=""):
+        self.status_code = status_code
+        self.json_data = json_data
+        self.text = text_data
+        self.ok = 200 <= status_code < 300
+
+    def json(self):
+        if self.json_data is not None:
+            return self.json_data
+        raise requests.exceptions.JSONDecodeError("No JSON data", "doc", 0)
+
+    def raise_for_status(self):
+        if not self.ok:
+            # Simplified: Real requests.HTTPError would have request and response attributes
+            raise requests.exceptions.HTTPError(f"HTTP Error {self.status_code}", response=self)
+
+
+class TestSkyvernAPIClient(unittest.TestCase):
+    def setUp(self):
+        # Patch settings for SKYVERN_API_KEY
+        self.settings_patcher = skyvern_patch('apps.integrations.services.skyvern.settings')
+        self.mock_settings = self.settings_patcher.start()
+        self.mock_settings.SKYVERN_API_KEY = "test_skyvern_key"
+        # Mock for circuit breaker state changes metric if needed by Skyvern client
+        self.skyvern_cb_metric_patcher = skyvern_patch('apps.integrations.services.skyvern.SKYVERN_CIRCUIT_BREAKER_STATE_CHANGES_TOTAL', SkyvernMagicMock())
+        self.mock_skyvern_cb_metric = self.skyvern_cb_metric_patcher.start()
+
+        # Patch requests.Session globally for where SkyvernAPIClient uses it
+        self.session_patcher = skyvern_patch('requests.Session', autospec=True)
+        self.MockSessionClass = self.session_patcher.start()
+        self.mock_session_instance = self.MockSessionClass.return_value # This is what client.session will be
+
+        # Mock Prometheus metrics used by SkyvernAPIClient
+        self.skyvern_api_calls_patcher = skyvern_patch('apps.integrations.services.skyvern.SKYVERN_API_CALLS_TOTAL')
+        self.mock_skyvern_api_calls = self.skyvern_api_calls_patcher.start()
+
+        self.skyvern_api_duration_patcher = skyvern_patch('apps.integrations.services.skyvern.SKYVERN_API_CALL_DURATION_SECONDS')
+        self.mock_skyvern_api_duration = self.skyvern_api_duration_patcher.start()
+
+        self.skyvern_api_errors_patcher = skyvern_patch('apps.integrations.services.skyvern.SKYVERN_API_ERRORS_TOTAL')
+        self.mock_skyvern_api_errors = self.skyvern_api_errors_patcher.start()
+
+
+        from apps.integrations.services.skyvern import SkyvernAPIClient # Import here after patching settings & requests
+        self.client = SkyvernAPIClient()
+        # Ensure the client's session is the mocked one
+        self.client.session = self.mock_session_instance
+
+
+    def tearDown(self):
+        self.settings_patcher.stop()
+        self.session_patcher.stop()
+        self.skyvern_cb_metric_patcher.stop()
+        self.skyvern_api_calls_patcher.stop()
+        self.skyvern_api_duration_patcher.stop()
+        self.skyvern_api_errors_patcher.stop()
+
+    def test_init_with_api_key(self):
+        self.assertEqual(self.client.api_key, "test_skyvern_key")
+        self.assertIsNotNone(self.client.session)
+
+    @skyvern_patch('apps.integrations.services.skyvern.logger') # Patch logger inside the service
+    def test_init_without_api_key(self, mock_logger):
+        self.mock_settings.SKYVERN_API_KEY = None
+        from apps.integrations.services.skyvern import SkyvernAPIClient
+        client_no_key = SkyvernAPIClient() # Re-init after changing mock_settings
+        self.assertIsNone(client_no_key.api_key)
+        mock_logger.warning.assert_called_with("Skyvern API key not configured. SkyvernAPIClient will not be able to make calls.")
+
+    def test_get_headers_success(self):
+        headers = self.client._get_headers()
+        self.assertEqual(headers["Authorization"], f"Bearer test_skyvern_key")
+        self.assertEqual(headers["Content-Type"], "application/json")
+
+    def test_get_headers_no_api_key_raises_error(self):
+        self.client.api_key = None # Simulate no API key
+        with self.assertRaises(ValueError) as context:
+            self.client._get_headers()
+        self.assertIn("Skyvern API key is not configured", str(context.exception))
+
+    def test_run_task_success(self):
+        mock_response_data = {"task_id": "sky_task_123", "status": "PENDING"}
+        self.mock_session_instance.post.return_value = MockSkyvernResponse(200, json_data=mock_response_data)
+
+        prompt = "Apply for this job."
+        inputs = {"url": "http://example.com/job/1"}
+        webhook_url = "http://my.webhook/skyvern"
+
+        response = self.client.run_task(prompt, inputs, webhook_url=webhook_url)
+
+        self.assertEqual(response, mock_response_data)
+        expected_url = f"{self.client.BASE_URL}/run-task"
+        expected_payload = {
+            "prompt": prompt,
+            "inputs": inputs,
+            "webhook_url": webhook_url
+        }
+        self.mock_session_instance.post.assert_called_once_with(
+            expected_url,
+            headers=self.client._get_headers(),
+            json=expected_payload,
+            params=None, # Assuming params is None for run_task
+            timeout=60
+        )
+        self.mock_skyvern_api_calls.labels(endpoint='/run-task', status_code='200').inc.assert_called_once()
+        self.mock_skyvern_api_duration.labels(endpoint='/run-task').observe.assert_called_once()
+
+    def test_run_task_api_http_error(self):
+        self.mock_session_instance.post.return_value = MockSkyvernResponse(500, text_data="Server Error")
+
+        response = self.client.run_task("prompt", {})
+        self.assertIsNone(response) # _make_request returns None on HTTPError
+        self.mock_skyvern_api_errors.labels(endpoint='/run-task', error_type='HTTPError').inc.assert_called_once()
+
+    def test_get_task_status_success(self):
+        task_id = "sky_task_123"
+        mock_response_data = {"task_id": task_id, "status": "COMPLETED"}
+        self.mock_session_instance.get.return_value = MockSkyvernResponse(200, json_data=mock_response_data)
+
+        response = self.client.get_task_status(task_id)
+        self.assertEqual(response, mock_response_data)
+        expected_url = f"{self.client.BASE_URL}/task-status/{task_id}"
+        self.mock_session_instance.get.assert_called_once_with(
+            expected_url,
+            headers=self.client._get_headers(),
+            params=None, # Assuming no extra params for get_task_status
+            timeout=30
+        )
+        self.mock_skyvern_api_calls.labels(endpoint=f'/task-status/{task_id}', status_code='200').inc.assert_called_once()
+
+    def test_get_task_results_success(self):
+        task_id = "sky_task_123"
+        mock_response_data = {"task_id": task_id, "status": "COMPLETED", "data": {"applied": True}}
+        self.mock_session_instance.get.return_value = MockSkyvernResponse(200, json_data=mock_response_data)
+
+        response = self.client.get_task_results(task_id)
+        self.assertEqual(response, mock_response_data)
+        expected_url = f"{self.client.BASE_URL}/task-results/{task_id}"
+        self.mock_session_instance.get.assert_called_once_with(
+            expected_url,
+            headers=self.client._get_headers(),
+            params=None,
+            timeout=30
+        )
+
+    # Conceptual test for circuit breaker - hard to test state changes without exposing CB state or more complex mocking
+    @skyvern_patch('time.sleep') # To avoid actual sleep in tests
+    def test_make_request_circuit_breaker_opens_and_blocks(self, mock_sleep):
+        self.mock_session_instance.post.side_effect = requests.exceptions.ConnectionError("Simulated connection error")
+
+        # Trigger failures to open circuit breaker
+        for _ in range(self.client.CB_MAX_FAILURES):
+            self.client.run_task("prompt", {}) # This will call _make_request
+
+        # Circuit should be open now
+        with self.assertRaises(requests.exceptions.ConnectionError) as context:
+            self.client.run_task("prompt", {})
+        self.assertIn("Skyvern Circuit Breaker is OPEN", str(context.exception))
+
+        # Check metric for CB state change to OPEN
+        self.mock_skyvern_cb_metric.labels(new_state='OPEN').inc.assert_called()
+
+
+if __name__ == '__main__':
+    # For full Django integration, use `python manage.py test apps.common`
     unittest.main()

@@ -509,3 +509,183 @@ class TestOpenAIRAGTasks(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class MockApplication:
+    objects = MagicMock()
+    def __init__(self, id, skyvern_task_id=None, status='pending', **kwargs):
+        self.id = id
+        self.skyvern_task_id = skyvern_task_id
+        self.status = status
+        self.skyvern_response_data = None
+        self.applied_at = None
+        for key, value in kwargs.items():
+            setattr(self, key, value)
+
+    def save(self, update_fields=None): # Mock save
+        pass
+
+
+class TestSkyvernTasks(unittest.TestCase):
+    def setUp(self):
+        # Patch SkyvernAPIClient where it's imported by apps.integrations.tasks
+        self.patcher_skyvern_client = patch('apps.integrations.tasks.SkyvernAPIClient', autospec=True)
+        self.MockSkyvernAPIClientClass = self.patcher_skyvern_client.start()
+        self.mock_skyvern_client_instance = self.MockSkyvernAPIClientClass.return_value
+
+        # Patch Application model
+        self.patcher_application_model = patch('apps.integrations.tasks.Application', new_callable=lambda: MockApplication)
+        self.MockApplicationModel = self.patcher_application_model.start()
+        self.MockApplicationModel.objects = MagicMock() # Mock the manager
+        self.MockApplicationModel.DoesNotExist = classmethod(lambda cls: type('DoesNotExist', (Exception,), {}))()
+
+
+        # Patch Prometheus metrics for Skyvern submissions
+        self.patcher_skyvern_submissions_total = patch('apps.integrations.tasks.SKYVERN_APPLICATION_SUBMISSIONS_TOTAL')
+        self.mock_skyvern_submissions_total = self.patcher_skyvern_submissions_total.start()
+
+        # Patch timezone.now for predictable applied_at
+        self.patcher_timezone_now = patch('apps.integrations.tasks.timezone.now')
+        self.mock_timezone_now = self.patcher_timezone_now.start()
+        self.mock_timezone_now.return_value = "mocked_datetime_now"
+
+
+        # Reload tasks module to ensure it uses our patched versions
+        global integration_tasks
+        import importlib
+        from apps.integrations import tasks as tasks_module
+        importlib.reload(tasks_module)
+        integration_tasks = tasks_module
+
+    def tearDown(self):
+        self.patcher_skyvern_client.stop()
+        self.patcher_application_model.stop()
+        self.patcher_skyvern_submissions_total.stop()
+        self.patcher_timezone_now.stop()
+
+    def test_submit_skyvern_application_task_success(self):
+        app_id = str(uuid.uuid4())
+        job_url = "http://example.com/job/123"
+        prompt_template = "Apply to {job_url}"
+        user_profile_data = {"name": "Test User"}
+
+        mock_app_instance = MockApplication(id=app_id)
+        self.MockApplicationModel.objects.get.return_value = mock_app_instance
+
+        self.mock_skyvern_client_instance.run_task.return_value = {"task_id": "sky_123", "status": "PENDING"}
+
+        result = integration_tasks.submit_skyvern_application_task(
+            app_id, job_url, prompt_template, user_profile_data
+        )
+
+        self.assertEqual(result["status"], "success")
+        self.assertEqual(result["skyvern_task_id"], "sky_123")
+        self.MockApplicationModel.objects.get.assert_called_once_with(id=app_id)
+        self.mock_skyvern_client_instance.run_task.assert_called_once()
+        self.assertEqual(mock_app_instance.skyvern_task_id, "sky_123")
+        self.assertEqual(mock_app_instance.status, 'submitting_via_skyvern')
+        # Check that save was called with specific fields
+        mock_app_instance.save.assert_called_once_with(update_fields=['skyvern_task_id', 'status', 'updated_at'])
+        self.mock_skyvern_submissions_total.labels(status='initiated').inc.assert_called_once()
+
+    def test_submit_skyvern_application_task_app_not_found(self):
+        self.MockApplicationModel.objects.get.side_effect = self.MockApplicationModel.DoesNotExist
+
+        result = integration_tasks.submit_skyvern_application_task("nonexistent_app_id", "url", "prompt", {})
+        self.assertEqual(result["status"], "error")
+        self.assertEqual(result["error"], "Application not found")
+        self.mock_skyvern_client_instance.run_task.assert_not_called()
+        self.mock_skyvern_submissions_total.labels(status='application_not_found').inc.assert_called_once()
+
+
+    def test_submit_skyvern_application_task_skyvern_api_fails_to_create_task(self):
+        app_id = str(uuid.uuid4())
+        mock_app_instance = MockApplication(id=app_id)
+        self.MockApplicationModel.objects.get.return_value = mock_app_instance
+        self.mock_skyvern_client_instance.run_task.return_value = None # Skyvern API call failed
+
+        result = integration_tasks.submit_skyvern_application_task(app_id, "url", "prompt", {})
+
+        self.assertEqual(result["status"], "failure")
+        self.assertEqual(mock_app_instance.status, 'skyvern_submission_failed')
+        mock_app_instance.save.assert_called_once_with(update_fields=['status', 'skyvern_response_data', 'updated_at'])
+        self.mock_skyvern_submissions_total.labels(status='creation_failed').inc.assert_called_once()
+
+    def test_check_skyvern_task_status_task_completed(self):
+        skyvern_task_id = "sky_123"
+        app_id = str(uuid.uuid4())
+        mock_app_instance = MockApplication(id=app_id, skyvern_task_id=skyvern_task_id)
+        self.MockApplicationModel.objects.get.return_value = mock_app_instance
+        self.mock_skyvern_client_instance.get_task_status.return_value = {"status": "COMPLETED"}
+
+        # Mock the .delay() method of the task we are going to call
+        with patch('apps.integrations.tasks.retrieve_skyvern_task_results_task.delay') as mock_retrieve_delay:
+            result = integration_tasks.check_skyvern_task_status_task(skyvern_task_id, app_id)
+
+        self.assertEqual(result["skyvern_status"], "COMPLETED")
+        self.assertEqual(mock_app_instance.status, 'submitted')
+        self.assertEqual(mock_app_instance.applied_at, "mocked_datetime_now")
+        mock_app_instance.save.assert_called_once_with(update_fields=['status', 'updated_at', 'applied_at'])
+        self.mock_skyvern_submissions_total.labels(status='completed_success').inc.assert_called_once()
+        mock_retrieve_delay.assert_called_once_with(skyvern_task_id, app_id)
+
+
+    def test_check_skyvern_task_status_task_failed(self):
+        skyvern_task_id = "sky_456"
+        app_id = str(uuid.uuid4())
+        mock_app_instance = MockApplication(id=app_id, skyvern_task_id=skyvern_task_id)
+        self.MockApplicationModel.objects.get.return_value = mock_app_instance
+        skyvern_api_response = {"status": "FAILED", "error_details": "Some error from Skyvern"}
+        self.mock_skyvern_client_instance.get_task_status.return_value = skyvern_api_response
+
+        result = integration_tasks.check_skyvern_task_status_task(skyvern_task_id, app_id)
+
+        self.assertEqual(result["skyvern_status"], "FAILED")
+        self.assertEqual(mock_app_instance.status, 'skyvern_submission_failed')
+        self.assertEqual(mock_app_instance.skyvern_response_data, skyvern_api_response)
+        mock_app_instance.save.assert_called_once_with(update_fields=['status', 'updated_at', 'skyvern_response_data'])
+        self.mock_skyvern_submissions_total.labels(status='failed').inc.assert_called_once()
+
+    def test_check_skyvern_task_status_app_not_found(self):
+        self.MockApplicationModel.objects.get.side_effect = self.MockApplicationModel.DoesNotExist
+        result = integration_tasks.check_skyvern_task_status_task("sky_id", "app_id")
+        self.assertEqual(result["status"], "error")
+        self.assertEqual(result["error"], "Application for Skyvern task not found")
+        self.mock_skyvern_submissions_total.labels(status='check_app_not_found').inc.assert_called_once()
+
+
+    def test_retrieve_skyvern_task_results_task_success(self):
+        skyvern_task_id = "sky_789"
+        app_id = str(uuid.uuid4())
+        mock_app_instance = MockApplication(id=app_id, skyvern_task_id=skyvern_task_id)
+        self.MockApplicationModel.objects.get.return_value = mock_app_instance
+
+        results_payload = {"data": {"confirmation_id": "conf_123"}, "status": "COMPLETED"}
+        self.mock_skyvern_client_instance.get_task_results.return_value = results_payload
+
+        result = integration_tasks.retrieve_skyvern_task_results_task(skyvern_task_id, app_id)
+
+        self.assertEqual(result["status"], "success")
+        self.assertTrue(result["results_fetched"])
+        self.assertEqual(mock_app_instance.skyvern_response_data, results_payload)
+        # Status should remain 'submitted' if already set by check_status, or updated if results say FAILED
+        # Current logic updates status if results say FAILED and current status is not already failed.
+        self.assertEqual(mock_app_instance.status, 'submitted') # Assuming it was 'submitted'
+        mock_app_instance.save.assert_called_once_with(update_fields=['skyvern_response_data', 'status', 'updated_at'])
+
+    def test_retrieve_skyvern_task_results_task_api_returns_none(self):
+        skyvern_task_id = "sky_000"
+        app_id = str(uuid.uuid4())
+        mock_app_instance = MockApplication(id=app_id, skyvern_task_id=skyvern_task_id)
+        self.MockApplicationModel.objects.get.return_value = mock_app_instance
+        self.mock_skyvern_client_instance.get_task_results.return_value = None # API call failed or no data
+
+        result = integration_tasks.retrieve_skyvern_task_results_task(skyvern_task_id, app_id)
+
+        self.assertEqual(result["status"], "no_results_data")
+        self.assertEqual(mock_app_instance.skyvern_response_data, {"info": "Results retrieval attempted, no data returned by Skyvern."})
+        mock_app_instance.save.assert_called_once_with(update_fields=['skyvern_response_data', 'updated_at'])
+
+
+if __name__ == '__main__':
+    unittest.main()
