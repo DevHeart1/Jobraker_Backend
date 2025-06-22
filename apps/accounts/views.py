@@ -47,9 +47,9 @@ User = get_user_model()
     ),
     create=extend_schema(
         summary="Create new user",
-        description="Create a new user account (Note: For self-registration, use the /auth/register/ endpoint. This is more for admin creation if permissions allow).",
+        description="Create a new user account",
         tags=['Users'],
-        request=UserSerializer, # Explicitly defining request body
+        request=UserSerializer,
         responses={
             201: UserSerializer,
             400: OpenApiExample(
@@ -417,14 +417,11 @@ class LogoutView(APIView):
             description='Basic information about the authenticated user',
             value={
                 "id": 1,
-                "username": "user@example.com",
+                "username": "user@example.com", 
                 "email": "user@example.com",
                 "first_name": "John",
                 "last_name": "Doe",
-                # "is_staff": False, # Example: if you add more fields from User model
-                # "is_active": True,
                 "date_joined": "2025-06-15T10:00:00Z"
-                # Ensure all fields returned by the view's get method are in this example
             }
         ),
         401: OpenApiExample(
@@ -465,10 +462,9 @@ class CurrentUserView(APIView):
     summary="Change password",
     description="Change the current user's password with old password verification",
     tags=['Authentication'],
-    request=ChangePasswordSerializer, # Explicitly set serializer for request body
-    # request=OpenApiExample( # This can be used if ChangePasswordSerializer is not sufficient for example
-    # 'Change Password Request',
-    # summary='Password change data',
+    request=OpenApiExample(
+        'Change Password Request',
+        summary='Password change data',
         description='Old and new passwords for authentication',
         value={
             "old_password": "currentPassword123!",

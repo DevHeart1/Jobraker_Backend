@@ -19,11 +19,8 @@ class UserSerializer(serializers.ModelSerializer):
 
 class UserRegistrationSerializer(serializers.ModelSerializer):
     """Serializer for user registration."""
-    email = serializers.EmailField(help_text="User's email address. Will also be used as username.")
-    first_name = serializers.CharField(max_length=150, required=False, help_text="User's first name (optional).")
-    last_name = serializers.CharField(max_length=150, required=False, help_text="User's last name (optional).")
-    password = serializers.CharField(write_only=True, min_length=8, help_text="User's password (min. 8 characters).")
-    password_confirm = serializers.CharField(write_only=True, help_text="Password confirmation (must match password).")
+    password = serializers.CharField(write_only=True, min_length=8)
+    password_confirm = serializers.CharField(write_only=True)
     
     class Meta:
         model = User
@@ -60,8 +57,8 @@ class UserProfileSerializer(serializers.ModelSerializer):
 
 class ChangePasswordSerializer(serializers.Serializer):
     """Serializer for password change."""
-    old_password = serializers.CharField(required=True, help_text="The user's current password.")
-    new_password = serializers.CharField(required=True, min_length=8, help_text="The new desired password (min. 8 characters).")
+    old_password = serializers.CharField(required=True)
+    new_password = serializers.CharField(required=True, min_length=8)
     
     def validate_new_password(self, value):
         """Validate new password strength."""
