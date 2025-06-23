@@ -358,6 +358,103 @@ class OpenAIClient:
             logger.error(f"Error generating job suggestions: {e}")
             return ["Search for roles matching your current experience level"]
 
+    def generate_interview_questions(
+        self,
+        job_title: str,
+        job_description: str,
+        num_questions: int = 10,
+        question_types: Optional[List[str]] = None,
+        user_profile_summary: Optional[str] = None # Optional for future personalization
+    ) -> List[Dict[str, str]]:
+        """
+        Generates interview questions for a given job title and description using OpenAI.
+
+        Args:
+            job_title: The title of the job.
+            job_description: The description of the job.
+            num_questions: The desired number of questions.
+            question_types: Optional list of question types to generate (e.g., "technical", "behavioral").
+            user_profile_summary: Optional summary of the user's profile for personalized questions.
+
+        Returns:
+            A list of dictionaries, where each dictionary has "type" and "question" keys.
+            Returns an empty list if generation fails or an error occurs.
+        """
+        self._validate_api_key()
+
+        prompt_lines = [
+            "You are an expert interviewer and career coach.",
+            f"Generate {num_questions} insightful interview questions for a candidate applying for the role of '{job_title}'.",
+            "Base the questions primarily on the following job description:",
+            "--- JOB DESCRIPTION START ---",
+            job_description[:3000], # Truncate to avoid excessive length
+            "--- JOB DESCRIPTION END ---",
+        ]
+
+        if question_types:
+            types_str = ", ".join(question_types)
+            prompt_lines.append(f"Please include a mix of question types, focusing on: {types_str}.")
+        else:
+            prompt_lines.append("Please include a mix of question types, such as behavioral, technical (if applicable to the role), situational, and questions to assess cultural fit.")
+
+        if user_profile_summary:
+            prompt_lines.extend([
+                "\nOptionally, consider the following candidate profile summary to tailor some questions:",
+                "--- CANDIDATE PROFILE START ---",
+                user_profile_summary[:1000],
+                "--- CANDIDATE PROFILE END ---"
+            ])
+
+        prompt_lines.extend([
+            "\nReturn your response as a JSON list of objects. Each object should have exactly two keys: 'type' (a string describing the question category, e.g., 'Behavioral', 'Technical', 'Situational', 'Role-specific', 'Cultural Fit') and 'question' (the interview question itself).",
+            "Ensure the JSON is well-formed.",
+            f"Example format: [{\"type\": \"Behavioral\", \"question\": \"Describe a challenging project you worked on.\"}, ...]"
+        ])
+
+        system_prompt = "\n".join(prompt_lines)
+        user_message_content = f"Please generate the {num_questions} interview questions for the job title '{job_title}' as per the detailed instructions provided in the system prompt."
+
+        try:
+            # Using the existing chat_completion method from this class
+            response_text = self.chat_completion(
+                messages=[{"role": "user", "content": user_message_content}],
+                system_prompt=system_prompt, # The detailed instructions are now the system prompt
+                model="gpt-4o-mini", # Or a more capable model if needed for better JSON generation
+                temperature=0.6, # Moderate temperature for some creativity but structured output
+                max_tokens=1500  # Adjust based on expected number of questions and detail
+            )
+
+            # Attempt to parse the JSON response
+            # The LLM might sometimes return text before or after the JSON block.
+            # Try to extract JSON part.
+            json_start_index = response_text.find('[')
+            json_end_index = response_text.rfind(']')
+
+            if json_start_index != -1 and json_end_index != -1 and json_end_index > json_start_index:
+                json_str = response_text[json_start_index : json_end_index+1]
+                try:
+                    questions = json.loads(json_str)
+                    if isinstance(questions, list) and all(isinstance(q, dict) and 'type' in q and 'question' in q for q in questions):
+                        return questions
+                    else:
+                        logger.warning(f"OpenAI response for interview questions was valid JSON but not in the expected format: {json_str}")
+                        # Fallback: Try to parse as one question if it's a simple string response not matching JSON list
+                        return [{"type": "general", "question": response_text.strip()}] if len(response_text.strip()) > 10 else []
+
+
+                except json.JSONDecodeError as je:
+                    logger.error(f"Failed to decode JSON response from OpenAI for interview questions: {je}. Response was: {json_str}")
+                    # Fallback: Try to return the raw response as a single question if it looks like one
+                    return [{"type": "general", "question": response_text.strip()}] if len(response_text.strip()) > 10 else []
+            else:
+                logger.warning(f"Could not find JSON list in OpenAI response for interview questions: {response_text}")
+                return [{"type": "general", "question": response_text.strip()}] if len(response_text.strip()) > 10 else []
+
+
+        except Exception as e:
+            logger.error(f"Error generating interview questions via OpenAI: {e}")
+            return []
+
 
 class EmbeddingService:
     """

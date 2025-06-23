@@ -511,6 +511,153 @@ if __name__ == '__main__':
     unittest.main()
 
 
+# Test class for the new generate_interview_questions_task
+class TestInterviewQuestionTasks(unittest.TestCase):
+    def setUp(self):
+        # Patch Job model lookup
+        self.patcher_job_model = patch('apps.integrations.tasks.Job')
+        self.MockJobModel = self.patcher_job_model.start()
+        self.mock_job_instance = MagicMock()
+        self.MockJobModel.objects.get.return_value = self.mock_job_instance
+
+        # Patch UserProfile model lookup (optional, if user_id is used)
+        self.patcher_user_profile_model = patch('apps.integrations.tasks.UserProfile')
+        self.MockUserProfileModel = self.patcher_user_profile_model.start()
+        self.mock_user_profile_instance = MagicMock()
+        self.MockUserProfileModel.objects.get.return_value = self.mock_user_profile_instance
+
+        # Patch OpenAIClient
+        self.patcher_openai_client = patch('apps.integrations.tasks.OpenAIClient')
+        self.MockOpenAIClientClass = self.patcher_openai_client.start()
+        self.mock_openai_client_instance = self.MockOpenAIClientClass.return_value
+        # Assume OpenAIClient has a 'model' attribute for metrics
+        self.mock_openai_client_instance.model = "gpt-test-interviewer"
+
+
+        # Patch Prometheus metrics
+        self.patcher_openai_calls_total_it = patch('apps.integrations.tasks.OPENAI_API_CALLS_TOTAL')
+        self.mock_openai_calls_total_it = self.patcher_openai_calls_total_it.start()
+        self.patcher_openai_call_duration_it = patch('apps.integrations.tasks.OPENAI_API_CALL_DURATION_SECONDS')
+        self.mock_openai_call_duration_it = self.patcher_openai_call_duration_it.start()
+
+        # Reload tasks module to ensure it uses our patched versions
+        # This is important if tasks.py imports these at the module level
+        global integration_tasks
+        import importlib
+        from apps.integrations import tasks as tasks_module
+        importlib.reload(tasks_module)
+        integration_tasks = tasks_module
+
+
+    def tearDown(self):
+        self.patcher_job_model.stop()
+        self.patcher_user_profile_model.stop()
+        self.patcher_openai_client.stop()
+        self.patcher_openai_calls_total_it.stop()
+        self.patcher_openai_call_duration_it.stop()
+
+    def test_generate_interview_questions_task_success(self):
+        job_id = "test_job_uuid"
+        user_id_for_task = "test_user_uuid" # Can be None if not testing personalization
+
+        self.mock_job_instance.id = job_id
+        self.mock_job_instance.title = "Senior Developer"
+        self.mock_job_instance.description = "Requires Python and Django skills."
+
+        # Mock UserProfile data if user_id is passed
+        self.mock_user_profile_instance.current_title = "Software Engineer"
+        self.mock_user_profile_instance.get_experience_level_display.return_value = "Mid Level"
+        self.mock_user_profile_instance.skills = ["Python", "API", "JavaScript", "SQL", "Docker", "Kubernetes"] # More than 5
+        self.mock_user_profile_instance.bio = "A passionate developer building cool things."
+
+
+        expected_questions = [{"type": "Technical", "question": "Explain Django's ORM."}]
+        self.mock_openai_client_instance.generate_interview_questions.return_value = expected_questions
+
+        result = integration_tasks.generate_interview_questions_task(job_id=job_id, user_id=user_id_for_task)
+
+        self.MockJobModel.objects.get.assert_called_once_with(id=job_id)
+        if user_id_for_task:
+            self.MockUserProfileModel.objects.get.assert_called_once_with(user_id=user_id_for_task)
+            expected_profile_summary_parts = [
+                "Current Title: Software Engineer",
+                "Experience Level: Mid Level",
+                "Key Skills: Python, API, JavaScript, SQL, Docker", # Top 5
+                f"Bio Snippet: {self.mock_user_profile_instance.bio[:200]}..."
+            ]
+            expected_summary = ". ".join(expected_profile_summary_parts)
+        else:
+            expected_summary = None
+            self.MockUserProfileModel.objects.get.assert_not_called()
+
+
+        self.mock_openai_client_instance.generate_interview_questions.assert_called_once_with(
+            job_title=self.mock_job_instance.title,
+            job_description=self.mock_job_instance.description,
+            user_profile_summary=expected_summary # Will be None if user_id_for_task is None
+        )
+
+        self.assertEqual(result['job_id'], job_id)
+        self.assertEqual(result['job_title'], self.mock_job_instance.title)
+        self.assertEqual(result['questions'], expected_questions)
+        self.assertEqual(result['status'], 'success')
+
+        self.mock_openai_calls_total_it.labels(type='interview_question_generation', model=self.mock_openai_client_instance.model, status='success').inc.assert_called_once()
+        self.mock_openai_call_duration_it.labels(type='interview_question_generation', model=self.mock_openai_client_instance.model).observe.assert_called_once()
+
+    def test_generate_interview_questions_task_job_not_found(self):
+        self.MockJobModel.objects.get.side_effect = self.MockJobModel.DoesNotExist # Simulate Job.DoesNotExist
+
+        result = integration_tasks.generate_interview_questions_task(job_id="non_existent_job_id")
+
+        self.assertEqual(result['status'], 'error')
+        self.assertEqual(result['error'], 'Job not found')
+        self.mock_openai_client_instance.generate_interview_questions.assert_not_called()
+        # Metrics should not be incremented for API call if it didn't happen
+        self.mock_openai_calls_total_it.labels().inc.assert_not_called()
+
+
+    def test_generate_interview_questions_task_openai_client_fails(self):
+        job_id = "another_job_uuid"
+        self.mock_job_instance.id = job_id
+        self.mock_job_instance.title = "QA Engineer"
+        self.mock_job_instance.description = "Test software."
+
+        self.mock_openai_client_instance.generate_interview_questions.side_effect = Exception("OpenAI Client Error")
+
+        with self.assertRaises(Retry): # Expect Celery to retry
+            integration_tasks.generate_interview_questions_task(job_id=job_id, user_id=None)
+
+        # Check metrics for error status
+        self.mock_openai_calls_total_it.labels(type='interview_question_generation', model=self.mock_openai_client_instance.model, status='error').inc.assert_called_once()
+        self.mock_openai_call_duration_it.labels(type='interview_question_generation', model=self.mock_openai_client_instance.model).observe.assert_called_once()
+
+    def test_generate_interview_questions_task_no_user_profile_found(self):
+        job_id = "job_with_user_no_profile"
+        user_id_no_profile = "user_no_profile_uuid"
+
+        self.mock_job_instance.id = job_id
+        self.mock_job_instance.title = "Analyst"
+        self.mock_job_instance.description = "Analyze things."
+
+        self.MockUserProfileModel.objects.get.side_effect = self.MockUserProfileModel.DoesNotExist
+
+        expected_questions = [{"type": "General", "question": "Why this role?"}]
+        self.mock_openai_client_instance.generate_interview_questions.return_value = expected_questions
+
+        result = integration_tasks.generate_interview_questions_task(job_id=job_id, user_id=user_id_no_profile)
+
+        self.MockUserProfileModel.objects.get.assert_called_once_with(user_id=user_id_no_profile)
+        # Ensure client was called with user_profile_summary=None
+        self.mock_openai_client_instance.generate_interview_questions.assert_called_once_with(
+            job_title=self.mock_job_instance.title,
+            job_description=self.mock_job_instance.description,
+            user_profile_summary=None
+        )
+        self.assertEqual(result['status'], 'success') # Task should still succeed
+        self.assertEqual(result['questions'], expected_questions)
+
+
 class MockApplication:
     objects = MagicMock()
     def __init__(self, id, skyvern_task_id=None, status='pending', **kwargs):
