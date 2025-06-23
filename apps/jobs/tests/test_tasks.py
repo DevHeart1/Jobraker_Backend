@@ -91,8 +91,17 @@ class TestJobAlertTasks(unittest.TestCase):
         self.mock_timezone.timedelta = timezone.timedelta # Allow timedelta to work
 
         # Conceptual: Mock notification sending
-        self.patcher_notification = patch('apps.jobs.tasks.logger.info') # Patching logger.info where notifications are logged
+        self.patcher_notification = patch('apps.jobs.tasks.logger.info') # Keep for other log checks if any
         self.mock_notification_logger = self.patcher_notification.start()
+
+        self.patcher_send_mail = patch('apps.jobs.tasks.send_mail') # Mock send_mail
+        self.mock_send_mail = self.patcher_send_mail.start()
+
+        self.patcher_settings = patch('apps.jobs.tasks.settings')
+        self.mock_settings = self.patcher_settings.start()
+        self.mock_settings.DEFAULT_FROM_EMAIL = 'noreply@jobraker.com'
+        self.mock_settings.SITE_URL = 'http://testserver'
+
 
         # Reload tasks module to use patched versions
         global job_tasks # Make it accessible to test methods
@@ -107,6 +116,8 @@ class TestJobAlertTasks(unittest.TestCase):
         self.patcher_job_alert_model.stop()
         self.patcher_timezone.stop()
         self.patcher_notification.stop()
+        self.patcher_send_mail.stop()
+        self.patcher_settings.stop()
 
     def test_process_job_alerts_task_no_active_alerts(self):
         self.MockJobAlertModel.objects.filter.return_value = MockQuerySet([]) # No active alerts
@@ -144,14 +155,109 @@ class TestJobAlertTasks(unittest.TestCase):
         result = job_tasks.process_job_alerts_task()
 
         self.assertEqual(result['processed_alerts'], 1)
-        self.assertEqual(result['notifications_triggered'], 1)
+        self.assertEqual(result['notifications_sent'], 1) # Updated to check 'notifications_sent'
 
-        # Check that the conceptual notification log was called
-        self.mock_notification_logger.assert_any_call(f"  -> Conceptual notification triggered for user {alert1.user.id}, job {job1.id}, alert '{alert1.name}'.")
+        # Check that send_mail was called
+        self.mock_send_mail.assert_called_once()
+        args, kwargs = self.mock_send_mail.call_args
+        self.assertEqual(kwargs['subject'], f"New Job Matches for Your Alert: {alert1.name}")
+        self.assertIn(job1.title, kwargs['message'])
+        self.assertIn(f"/jobs/{job1.id}/", kwargs['message']) # Check for job URL part
+        self.assertEqual(kwargs['from_email'], self.mock_settings.DEFAULT_FROM_EMAIL)
+        self.assertEqual(kwargs['recipient_list'], [alert1.user.email]) # Assuming MockJobAlert.user has an email attribute
+
         self.assertEqual(alert1.last_run, self.mock_now)
+        self.mock_send_mail.reset_mock() # Reset for other tests
+
+    def test_process_job_alerts_task_respects_frequency(self):
+        # Alert 1: Daily, ran 12 hours ago -> should not run
+        alert1_user = MagicMock(email='user1@example.com', first_name='User1')
+        alert1 = MockJobAlert(id=1, user_id=1, name="Daily Alert", frequency='daily', last_run=self.mock_now - timedelta(hours=12))
+        alert1.user = alert1_user # Attach mock user with email
+
+        # Alert 2: Weekly, ran 8 days ago -> should run
+        alert2_user = MagicMock(email='user2@example.com', first_name='User2')
+        alert2 = MockJobAlert(id=2, user_id=2, name="Weekly Alert", frequency='weekly', last_run=self.mock_now - timedelta(days=8), keywords=["TestJob"])
+        alert2.user = alert2_user
+
+        # Alert 3: Daily, never ran -> should run
+        alert3_user = MagicMock(email='user3@example.com', first_name='User3')
+        alert3 = MockJobAlert(id=3, user_id=3, name="New Daily Alert", frequency='daily', last_run=None, keywords=["AnotherJob"])
+        alert3.user = alert3_user
+
+        # Alert 4: Monthly, ran 15 days ago -> should not run
+        alert4_user = MagicMock(email='user4@example.com', first_name='User4')
+        alert4 = MockJobAlert(id=4, user_id=4, name="Monthly Alert", frequency='monthly', last_run=self.mock_now - timedelta(days=15))
+        alert4.user = alert4_user
+
+        self.MockJobAlertModel.objects.filter.return_value = MockQuerySet([alert1, alert2, alert3, alert4])
+
+        # Simulate jobs for alerts that should run
+        job_for_alert2 = MockJob(id=uuid.uuid4(), title="TestJob Title", created_at=self.mock_now - timedelta(hours=1))
+        job_for_alert3 = MockJob(id=uuid.uuid4(), title="AnotherJob Title", created_at=self.mock_now - timedelta(hours=1))
+
+        # This mock needs to be more dynamic or called multiple times if Job.objects.filter is inside the loop for each alert.
+        # For simplicity, assume it's called once and returns all possible jobs, and the task filters them.
+        # Or, more accurately, mock its side_effect if called per alert.
+
+        # Let's make the Job.objects.filter mock return jobs based on alert.
+        def job_filter_side_effect(*args, **kwargs):
+            # This is a simplified check. A real one would inspect the Q objects in args[0]
+            # to see if they match the alert's criteria.
+            # For this test, we'll "know" which alert is being processed by iterating call_count or by specific Q filters.
+            # This is hard to do without deep Q object inspection.
+            # Alternative: Set up specific MockQuerySet instances for each expected call.
+
+            # Simplified: If the filter is for alert2's keywords, return job_for_alert2.
+            # This relies on the keyword filter being specific enough.
+            # This part is tricky to mock perfectly without more complex side_effect logic.
+            # Let's assume the first call to Job.objects.filter is for alert2 (which runs)
+            # and the second is for alert3 (which runs).
+
+            # Call 1 (alert2)
+            if self.MockJobModel.objects.filter.call_count == 1: # First time it's called (for alert2)
+                return MockQuerySet([job_for_alert2])
+            # Call 2 (alert3)
+            elif self.MockJobModel.objects.filter.call_count == 2: # Second time (for alert3)
+                 return MockQuerySet([job_for_alert3])
+            return MockQuerySet([]) # Default no jobs
+
+        self.MockJobModel.objects.filter.side_effect = job_filter_side_effect
+
+        result = job_tasks.process_job_alerts_task()
+
+        self.assertEqual(result['alerts_skipped_frequency'], 2) # alert1 and alert4 skipped
+        self.assertEqual(result['alerts_processed'], 2)      # alert2 and alert3 processed
+        self.assertEqual(result['notifications_sent'], 2)    # One email for alert2, one for alert3
+
+        # Check send_mail calls
+        self.assertEqual(self.mock_send_mail.call_count, 2)
+
+        # Check call for alert2
+        call_args_alert2 = self.mock_send_mail.call_args_list[0]
+        self.assertEqual(call_args_alert2[1]['subject'], f"New Job Matches for Your Alert: {alert2.name}")
+        self.assertIn(job_for_alert2.title, call_args_alert2[1]['message'])
+        self.assertEqual(call_args_alert2[1]['recipient_list'], [alert2.user.email])
+
+        # Check call for alert3
+        call_args_alert3 = self.mock_send_mail.call_args_list[1]
+        self.assertEqual(call_args_alert3[1]['subject'], f"New Job Matches for Your Alert: {alert3.name}")
+        self.assertIn(job_for_alert3.title, call_args_alert3[1]['message'])
+        self.assertEqual(call_args_alert3[1]['recipient_list'], [alert3.user.email])
+
+        self.assertEqual(alert1.last_run, self.mock_now - timedelta(hours=12)) # Not updated
+        self.assertEqual(alert2.last_run, self.mock_now) # Updated
+        self.assertEqual(alert3.last_run, self.mock_now) # Updated
+        self.assertEqual(alert4.last_run, self.mock_now - timedelta(days=15)) # Not updated
+
+        self.mock_send_mail.reset_mock()
+        self.MockJobModel.objects.filter.side_effect = None # Reset side effect
 
     def test_process_job_alerts_task_keyword_matching(self):
+        # Mock user for the alert
+        alert_user = MagicMock(email='keyworduser@example.com', first_name='Keyword')
         alert1 = MockJobAlert(id=1, user_id=1, keywords=["Urgent", "Backend"], last_run=None)
+        alert1.user = alert_user # Attach mock user
         self.MockJobAlertModel.objects.filter.return_value = MockQuerySet([alert1])
 
         # Job matches "Backend" in title, "Urgent" in description

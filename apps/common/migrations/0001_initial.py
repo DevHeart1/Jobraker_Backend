@@ -47,15 +47,26 @@ class Migration(migrations.Migration):
         # 'vector_ip_ops' for inner product (negative inner product for distance)
         # OpenAI embeddings are normalized, so L2 distance and cosine similarity are related.
         # L2 distance is often a good default.
-        pgvector.django.HnswIndex(
-            name='vectordoc_embedding_hnsw_l2_idx',
-            model_name='VectorDocument', # Name of the model
-            field_name='embedding',       # Name of the VectorField
-            m=16,                         # Index parameter (default 16)
-            ef_construction=64,           # Index parameter (default 64)
-            opclasses=['vector_l2_ops']   # Operator class for L2 distance
+        migrations.AddIndex(
+            model_name='VectorDocument',
+            index=pgvector.django.HnswIndex(
+                name='vectordoc_embedding_hnsw_l2_idx',
+                fields=['embedding'],       # Corrected from field_name
+                m=16,
+                ef_construction=64,
+                opclasses=['vector_l2_ops']
+            ),
         ),
         # Alternatively, for IVFFlat index (another common type):
+        # migrations.AddIndex(
+        #     model_name='VectorDocument',
+        #     index=pgvector.django.IvfflatIndex(
+        #         name='vectordoc_embedding_ivfflat_l2_idx',
+        #         fields=['embedding'],
+        #         lists=100,
+        #         opclasses=['vector_l2_ops']
+        #     )
+        # ),
         # pgvector.django.IvfflatIndex(
         #     name='vectordoc_embedding_ivfflat_l2_idx',
         #     model_name='VectorDocument',

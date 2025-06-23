@@ -1,5 +1,6 @@
 from django.db import models
 from pgvector.django import VectorField
+from typing import List # Added this import
 
 class VectorDocument(models.Model):
     """
