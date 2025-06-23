@@ -15,7 +15,32 @@ except ImportError:
 
 # Security settings
 DEBUG = False
-ALLOWED_HOSTS = os.getenv('DJANGO_ALLOWED_HOSTS', '').split(',')
+
+# Allowed hosts configuration
+allowed_hosts_env = os.getenv('DJANGO_ALLOWED_HOSTS')
+if allowed_hosts_env:
+    ALLOWED_HOSTS = [host.strip() for host in allowed_hosts_env.split(',')]
+else:
+    ALLOWED_HOSTS = []
+
+# Add Render's default external hostname if provided by Render's environment
+render_external_hostname = os.getenv('RENDER_EXTERNAL_HOSTNAME')
+if render_external_hostname:
+    if render_external_hostname not in ALLOWED_HOSTS: # Avoid duplicates
+        ALLOWED_HOSTS.append(render_external_hostname)
+
+# Example: If you have a fixed custom domain, you might add it like this:
+# if 'www.yourcustomdomain.com' not in ALLOWED_HOSTS:
+#     ALLOWED_HOSTS.append('www.yourcustomdomain.com')
+
+if not ALLOWED_HOSTS:
+    # As a fallback for safety in case no hosts are configured via env vars.
+    # This should ideally be properly configured for any real deployment.
+    # For Render, RENDER_EXTERNAL_HOSTNAME should typically be set.
+    # If not, you might want to log a warning or raise an ImproperlyConfigured error.
+    print("WARNING: DJANGO_ALLOWED_HOSTS is not set. Service might not be accessible.")
+    # ALLOWED_HOSTS = ['localhost', '127.0.0.1'] # Fallback for local testing of prod settings if needed
+
 
 # Security middleware for production
 MIDDLEWARE = [

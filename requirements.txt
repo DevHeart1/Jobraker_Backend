@@ -38,10 +38,7 @@ drf-spectacular[sidecar]>=0.26.0
 requests>=2.31.0
 openai>=1.0.0
 httpx>=0.24.0
-
-# Environment & Configuration
-python-decouple>=3.8
-python-dotenv>=1.0.0
+pinecone-client>=3.0.0 # Added for VectorDBService
 
 # Monitoring & Logging
 sentry-sdk[django]>=1.28.0
