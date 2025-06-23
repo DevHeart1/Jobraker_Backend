@@ -317,3 +317,186 @@ class TestJobAlertTasks(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+from apps.jobs.models import Application as ActualApplication # Use actual model for setup
+from apps.jobs.models import Job as ActualJob
+from django.contrib.auth import get_user_model as actual_get_user_model
+
+ActualUser = actual_get_user_model()
+
+class TestApplicationReminderTasks(unittest.TestCase):
+    def setUp(self):
+        # We are testing the actual task which imports models directly.
+        # So, we need to use the real database for setup, or patch the models within the task's scope.
+        # Patching models within the task's scope is cleaner if we want to avoid DB hits during most tests.
+        # However, for query logic tests, sometimes using the test DB is easier.
+        # For this, let's try to use the real models for setup and patch external calls like send_mail and timezone.now.
+
+        self.patcher_timezone_task = patch('apps.jobs.tasks.timezone') # Patch timezone used in the task
+        self.mock_timezone_task = self.patcher_timezone_task.start()
+        self.mock_now_task = timezone.now() # Fixed "now" for this test run
+        self.mock_timezone_task.now.return_value = self.mock_now_task
+        self.mock_timezone_task.timedelta = timezone.timedelta # Allow timedelta to work
+
+        self.patcher_send_mail_task = patch('apps.jobs.tasks.send_mail')
+        self.mock_send_mail_task = self.patcher_send_mail_task.start()
+
+        self.patcher_settings_task = patch('apps.jobs.tasks.settings')
+        self.mock_settings_task = self.patcher_settings_task.start()
+        self.mock_settings_task.DEFAULT_FROM_EMAIL = 'reminders@jobraker.com'
+        # self.mock_settings_task.SITE_URL = 'http://testserver' # If URLs in email are tested
+
+        # Reload tasks module to use patched versions if it was imported at module level
+        # and not within the task function itself.
+        # The task `send_application_follow_up_reminders` imports models and Django utils inside.
+        global job_tasks
+        import importlib
+        from apps.jobs import tasks as tasks_module
+        importlib.reload(tasks_module) # Reload to ensure patches on timezone/send_mail are seen if imported at top of tasks.py
+        job_tasks = tasks_module
+
+
+        # Create actual DB objects for testing queries
+        self.user1 = ActualUser.objects.create_user(username='reminderuser1', email='reminder1@example.com', password='password', first_name='Reminder1')
+        self.user2 = ActualUser.objects.create_user(username='reminderuser2', email='reminder2@example.com', password='password', first_name='Reminder2')
+        self.user_no_email = ActualUser.objects.create_user(username='noemailuser', password='password')
+
+
+        self.job1 = ActualJob.objects.create(title="Job A", company="Comp A", description=".", location=".")
+        self.job2 = ActualJob.objects.create(title="Job B", company="Comp B", description=".", location=".")
+        self.job3 = ActualJob.objects.create(title="Job C", company="Comp C", description=".", location=".")
+        self.job4 = ActualJob.objects.create(title="Job D", company="Comp D", description=".", location=".")
+
+
+        # App 1: Due today, never reminded
+        self.app1 = ActualApplication.objects.create(
+            user=self.user1, job=self.job1, follow_up_date=self.mock_now_task.date()
+        )
+        # App 2: Due yesterday, never reminded
+        self.app2 = ActualApplication.objects.create(
+            user=self.user2, job=self.job2, follow_up_date=self.mock_now_task.date() - timedelta(days=1)
+        )
+        # App 3: Due today, already reminded for today's follow_up_date
+        self.app3 = ActualApplication.objects.create(
+            user=self.user1, job=self.job3, follow_up_date=self.mock_now_task.date(),
+            follow_up_reminder_sent_at=self.mock_now_task - timedelta(hours=1) # Reminded recently
+        )
+        # App 4: Due tomorrow -> should not be reminded
+        self.app4 = ActualApplication.objects.create(
+            user=self.user2, job=self.job4, follow_up_date=self.mock_now_task.date() + timedelta(days=1)
+        )
+        # App 5: Due yesterday, but reminder sent AFTER follow_up_date (e.g. date was moved back) -> should not remind
+        self.app5 = ActualApplication.objects.create(
+            user=self.user1, job=self.job1, # Reusing job1, ensure unique_together allows if different user or if test setup handles it
+            # For this test, let's make it a different application by not enforcing unique_together here for simplicity,
+            # or ensure it's a different job. Let's use a new job.
+            job=ActualJob.objects.create(title="Job E", company="Comp E"),
+            follow_up_date=self.mock_now_task.date() - timedelta(days=1),
+            follow_up_reminder_sent_at=self.mock_now_task.date() # Reminder sent "today" for yesterday's date
+        )
+         # App 6: Due today, user has no email
+        self.app6 = ActualApplication.objects.create(
+            user=self.user_no_email, job=self.job2, follow_up_date=self.mock_now_task.date()
+        )
+        # App 7: Due in past, reminder sent, but follow_up_date was moved even further to the past (before reminder) -> should not remind again
+        self.app7 = ActualApplication.objects.create(
+            user=self.user2, job=self.job3,
+            follow_up_date=self.mock_now_task.date() - timedelta(days=5),
+            follow_up_reminder_sent_at=self.mock_now_task - timedelta(days=3) # Reminder sent after the follow_up_date
+        )
+        # App 8: Due today, reminder sent, but follow_up_date was moved to today (same as reminder) -> should not remind
+        self.app8 = ActualApplication.objects.create(
+            user=self.user1, job=self.job4,
+            follow_up_date=self.mock_now_task.date() - timedelta(days=2), # Original follow up date
+        )
+        self.app8.follow_up_reminder_sent_at = self.mock_now_task - timedelta(days=2) # Reminder sent
+        self.app8.follow_up_date = self.mock_now_task.date() # User moved follow_up_date to today
+        self.app8.save() # This should be reminded (Q(follow_up_reminder_sent_at__lt=F('follow_up_date')))
+
+    def tearDown(self):
+        self.patcher_timezone_task.stop()
+        self.patcher_send_mail_task.stop()
+        self.patcher_settings_task.stop()
+        # Clean up database
+        ActualApplication.objects.all().delete()
+        ActualJob.objects.all().delete()
+        ActualUser.objects.all().delete()
+
+
+    def test_send_reminders_correct_applications(self):
+        # Expected to send for app1 (due today, never reminded)
+        # Expected to send for app2 (due yesterday, never reminded)
+        # Expected to send for app8 (due today, reminder was for older follow_up_date)
+        # Not for app3 (reminded for today)
+        # Not for app4 (due tomorrow)
+        # Not for app5 (reminder sent at/after follow_up_date)
+        # Not for app6 (no email)
+        # Not for app7 (reminder sent at/after follow_up_date)
+
+        result = job_tasks.send_application_follow_up_reminders()
+
+        self.assertEqual(result['sent_count'], 3)
+        self.assertEqual(self.mock_send_mail_task.call_count, 3)
+
+        # Check app1
+        self.app1.refresh_from_db()
+        self.assertIsNotNone(self.app1.follow_up_reminder_sent_at)
+        self.assertAlmostEqual(self.app1.follow_up_reminder_sent_at, self.mock_now_task, delta=timedelta(seconds=5))
+
+        # Check app2
+        self.app2.refresh_from_db()
+        self.assertIsNotNone(self.app2.follow_up_reminder_sent_at)
+
+        # Check app8
+        self.app8.refresh_from_db()
+        self.assertIsNotNone(self.app8.follow_up_reminder_sent_at)
+        # Ensure the new reminder time is later than the old one
+        self.assertTrue(self.app8.follow_up_reminder_sent_at > self.mock_now_task - timedelta(days=2))
+
+
+        # Check app3 (should not have been updated beyond initial reminder)
+        self.app3.refresh_from_db()
+        self.assertAlmostEqual(self.app3.follow_up_reminder_sent_at, self.mock_now_task - timedelta(hours=1), delta=timedelta(seconds=5))
+
+        # Check app6 (no email, reminder_sent_at should not be set by this task run)
+        self.app6.refresh_from_db()
+        self.assertIsNone(self.app6.follow_up_reminder_sent_at)
+
+        # Verify email content for one of them (e.g., app1)
+        # Need to find the correct call from call_args_list
+        found_app1_email = False
+        for call_args in self.mock_send_mail_task.call_args_list:
+            args, kwargs = call_args
+            if self.user1.email in kwargs['recipient_list'] and self.app1.job.title in kwargs['subject']:
+                self.assertEqual(kwargs['subject'], f"Reminder: Follow up on your application for '{self.app1.job.title}'")
+                self.assertIn(f"Hello {self.user1.first_name}", kwargs['message'])
+                self.assertIn(self.app1.job.title, kwargs['message'])
+                self.assertIn(self.app1.job.company, kwargs['message'])
+                self.assertEqual(kwargs['from_email'], self.mock_settings_task.DEFAULT_FROM_EMAIL)
+                found_app1_email = True
+                break
+        self.assertTrue(found_app1_email, "Email for app1 was not sent or arguments were incorrect.")
+
+    def test_no_reminders_due(self):
+        # Set all follow_up_dates to the future or reminders already sent appropriately
+        ActualApplication.objects.all().update(follow_up_date=self.mock_now_task.date() + timedelta(days=5))
+
+        result = job_tasks.send_application_follow_up_reminders()
+        self.assertEqual(result['status'], 'no_reminders_due')
+        self.assertEqual(result['sent_count'], 0)
+        self.mock_send_mail_task.assert_not_called()
+
+    def test_user_with_no_email_is_skipped(self):
+        # Ensure only app6 (user_no_email) is due
+        ActualApplication.objects.all().delete() # Clear other apps for this specific test
+        app_no_email = ActualApplication.objects.create(
+            user=self.user_no_email, job=self.job1, follow_up_date=self.mock_now_task.date()
+        )
+
+        result = job_tasks.send_application_follow_up_reminders()
+        self.assertEqual(result['sent_count'], 0)
+        self.assertEqual(result['processed_count'], 1) # Processed one app
+        self.mock_send_mail_task.assert_not_called()
+        app_no_email.refresh_from_db()
+        self.assertIsNone(app_no_email.follow_up_reminder_sent_at) # Should not be updated

@@ -6,6 +6,7 @@ from django.db import models
 from django.contrib.auth import get_user_model
 from django.core.validators import MinValueValidator, MaxValueValidator
 from django.utils import timezone
+from django.utils.translation import gettext_lazy as _ # Added for choices
 from pgvector.django import VectorField
 import uuid
 
@@ -219,8 +220,57 @@ class Application(models.Model):
     submission_logs = models.JSONField(default=list, help_text="Application submission logs (can include Skyvern logs or manual entries).")
     
     # Notes and Feedback
-    notes = models.TextField(blank=True)
+    notes = models.TextField(blank=True, help_text="System or general notes about the application.") # Existing notes field
+    user_notes = models.TextField(blank=True, help_text="User's private notes for this application.") # New field for user-specific notes
     feedback_received = models.TextField(blank=True)
+
+    # User-defined status for personal tracking
+    USER_DEFINED_STATUS_CHOICES = [
+        ('interested', 'Interested/Saved'),
+        ('preparing_application', 'Preparing Application'),
+        ('applied', 'Applied'),
+        ('assessment_phase', 'Assessment/Test Phase'),
+        ('initial_interview', 'Initial Interview'),
+        ('technical_interview', 'Technical Interview'),
+        ('final_interview', 'Final Interview/On-site'),
+        ('offer_pending', 'Offer Pending Decision'),
+        ('offer_received_custom', 'Offer Received (User Tracked)'), # To distinguish from system 'offer_received'
+        ('negotiating', 'Negotiating Offer'),
+        ('accepted_custom', 'Offer Accepted (User Tracked)'),
+        ('rejected_by_me', 'Declined by Me'),
+        ('rejected_by_company', 'Rejected by Company (User Tracked)'),
+        ('archived', 'Archived/Not Pursuing'),
+        ('other', 'Other'),
+    ]
+    user_defined_status = models.CharField(
+        max_length=30,
+        choices=USER_DEFINED_STATUS_CHOICES,
+        blank=True,
+        null=True,
+        help_text="User's custom status for tracking application progress."
+    )
+
+    # Detailed Interview and Offer Information
+    interview_details = models.JSONField(
+        default=list, # Could be a list of interview objects: [{"date": "...", "type": "...", "notes": "..."}]
+        blank=True,
+        null=True,
+        help_text="Structured details about interviews (e.g., date, type, interviewer, notes)."
+    )
+    offer_details = models.JSONField(
+        default=dict, # Could be an object: {"salary": ..., "start_date": ..., "bonus": ...}
+        blank=True,
+        null=True,
+        help_text="Structured details about any job offer received."
+    )
+
+    # Reminder Tracking
+    # follow_up_date is already defined: models.DateTimeField(null=True, blank=True)
+    follow_up_reminder_sent_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text="Timestamp of the last follow-up reminder sent for the 'follow_up_date'."
+    )
     
     # Timestamps
     applied_at = models.DateTimeField(null=True, blank=True)

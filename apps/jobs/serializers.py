@@ -151,7 +151,10 @@ class ApplicationSerializer(serializers.ModelSerializer):
     class Meta:
         model = Application
         fields = '__all__'
-        read_only_fields = ('id', 'user', 'created_at', 'updated_at', 'match_score')
+        read_only_fields = (
+            'id', 'user', 'created_at', 'updated_at',
+            'match_score', 'follow_up_reminder_sent_at' # Added follow_up_reminder_sent_at
+        )
     
     def create(self, validated_data):
         """Create application with job lookup."""

@@ -8,6 +8,8 @@ from celery import Celery
 # Set the default Django settings module for the 'celery' program.
 os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'jobraker.settings.development')
 
+from celery.schedules import crontab # Added for daily scheduling
+
 app = Celery('jobraker')
 
 # Using a string here means the worker doesn't have to serialize
@@ -53,6 +55,10 @@ app.conf.beat_schedule = {
     'process-job-alerts': {
         'task': 'apps.jobs.tasks.process_job_alerts_task',
         'schedule': 1800.0,  # Run every 30 minutes (30 * 60 seconds)
+    },
+    'send-application-follow-up-reminders': {
+        'task': 'apps.jobs.tasks.send_application_follow_up_reminders',
+        'schedule': crontab(hour=8, minute=0),  # Run daily at 8:00 AM UTC
     },
 }
 
