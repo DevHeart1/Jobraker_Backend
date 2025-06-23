@@ -83,9 +83,39 @@ def process_job_alerts_task(self):
 
     alerts_processed_count = 0
     notifications_sent_count = 0
+    alerts_skipped_due_to_frequency = 0
 
     for alert in active_alerts:
-        logger.info(f"Processing job alert ID: {alert.id} for user: {alert.user_id}")
+        # Check if alert is due based on its frequency
+        now = timezone.now()
+        should_process = False
+        if not alert.last_run: # Never run before
+            should_process = True
+        else:
+            # Accessing frequency string values directly
+            if alert.frequency == 'daily':
+                should_process = (now - alert.last_run) >= timezone.timedelta(days=1)
+            elif alert.frequency == 'weekly':
+                should_process = (now - alert.last_run) >= timezone.timedelta(weeks=1)
+            elif alert.frequency == 'monthly':
+                should_process = (now - alert.last_run) >= timezone.timedelta(days=30) # Approximation
+            elif alert.frequency == 'immediate':
+                # For a batch task like this, 'immediate' is tricky.
+                # It might mean process every time the task runs if new jobs exist.
+                # Or, 'immediate' alerts are handled by a different, more frequent task or signals.
+                # For this batch task, let's assume 'immediate' means it's always due if new jobs exist.
+                should_process = True
+                # Consider if 'immediate' alerts should even be processed by this batch job,
+                # or if they warrant a separate, more frequent mechanism (e.g., signal-based on Job creation).
+                # For now, including it here means it gets checked every time this batch task runs.
+
+        if not should_process:
+            alerts_skipped_due_to_frequency +=1
+            logger.debug(f"Skipping alert ID: {alert.id} for user: {alert.user.id} due to frequency. Last run: {alert.last_run}, Freq: {alert.frequency}")
+            continue
+
+        logger.info(f"Processing job alert ID: {alert.id} for user: {alert.user.id} (Frequency: {alert.frequency}, Last run: {alert.last_run})")
+        alerts_processed_count += 1
 
         job_filters = Q()
 
@@ -151,22 +181,72 @@ def process_job_alerts_task(self):
                 # content=f"New job matching your alert '{alert.name}': {job.title} at {job.company}",
                 # related_object=job
                 # )
-                logger.info(f"  -> Conceptual notification triggered for user {alert.user.id}, job {job.id}, alert '{alert.name}'.")
-                notifications_sent_count += 1
+                # logger.info(f"  -> Conceptual notification triggered for user {alert.user.id}, job {job.id}, alert '{alert.name}'.")
+                # notifications_sent_count += 1 # This will be counted per email sent now
                 # --- End Conceptual Notification Trigger ---
+                pass # Placeholder if no specific action per job other than collecting them
 
-            # Update last_run timestamp for the alert
+            if matching_jobs.exists():
+                # Prepare and send one email with all matching jobs for this alert
+                try:
+                    from django.core.mail import send_mail
+                    from django.conf import settings
+                    from django.urls import reverse # To build absolute URLs if needed
+
+                    subject = f"New Job Matches for Your Alert: {alert.name or 'Unnamed Alert'}"
+
+                    message_lines = [f"Hello {alert.user.first_name or alert.user.username},",
+                                     "\nWe found new jobs matching your alert criteria:\n"]
+
+                    for job in matching_jobs:
+                        # Assuming you have a way to get the absolute URL for a job
+                        # For example, if Job model has get_absolute_url or you construct it
+                        job_url = settings.SITE_URL + reverse('job-detail', kwargs={'pk': job.pk}) if hasattr(settings, 'SITE_URL') else f"/jobs/{job.pk}/" # Fallback relative URL
+                        message_lines.append(f"- {job.title} at {job.company} ({job.location})")
+                        message_lines.append(f"  View: {job_url}\n")
+
+                    message_lines.append("\nYou can manage your alerts here: [Link to Manage Alerts Page]") # Placeholder for actual link
+
+                    plain_message = "\n".join(message_lines)
+                    # html_message = ... # Optionally create an HTML version
+
+                    if alert.user.email and alert.email_notifications: # Check if user wants email notifications
+                        send_mail(
+                            subject,
+                            plain_message,
+                            settings.DEFAULT_FROM_EMAIL, # Ensure this is configured
+                            [alert.user.email],
+                            # html_message=html_message, # Optional
+                            fail_silently=False,
+                        )
+                        logger.info(f"Sent job alert email to {alert.user.email} for alert ID: {alert.id} with {matching_jobs.count()} jobs.")
+                        notifications_sent_count += 1
+                    else:
+                        logger.info(f"User {alert.user.email} has email notifications disabled for alert ID: {alert.id} or no email.")
+
+                except Exception as mail_exc:
+                    logger.error(f"Failed to send email for alert ID {alert.id} to {alert.user.email}: {mail_exc}")
+
+            # Update last_run timestamp for the alert, regardless of whether email was sent, to prevent re-processing same jobs
             alert.last_run = timezone.now()
             alert.save(update_fields=['last_run'])
-            alerts_processed_count += 1
+            # alerts_processed_count was incremented when we started processing this alert
 
         except Exception as e:
             logger.error(f"Error processing jobs for alert ID {alert.id}: {e}")
             # Continue to next alert, or re-raise if critical
 
-    logger.info(f"Finished processing job alerts. Processed: {alerts_processed_count} alerts. Conceptual notifications sent: {notifications_sent_count}.")
+    logger.info(
+        f"Finished processing job alerts. "
+        f"Total active alerts considered: {active_alerts.count()}. "
+        f"Skipped due to frequency: {alerts_skipped_due_to_frequency}. "
+        f"Actually processed: {alerts_processed_count} alerts. "
+        f"Email notifications sent: {notifications_sent_count}."
+    )
     return {
         "status": "completed",
-        "processed_alerts": alerts_processed_count,
-        "notifications_triggered": notifications_sent_count
+        "total_active_alerts": active_alerts.count(),
+        "alerts_skipped_frequency": alerts_skipped_due_to_frequency,
+        "alerts_processed": alerts_processed_count,
+        "notifications_sent": notifications_sent_count
     }

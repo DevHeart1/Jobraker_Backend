@@ -3,6 +3,7 @@ Celery tasks for integration services.
 """
 
 from celery import shared_task
+from typing import Dict, Any, Optional, List # Added for type hints
 from django.utils import timezone
 from django.contrib.auth import get_user_model
 import logging

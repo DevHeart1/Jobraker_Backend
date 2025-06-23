@@ -4,7 +4,7 @@ Serializers for jobs app API endpoints.
 
 from rest_framework import serializers
 from drf_spectacular.utils import extend_schema_serializer, OpenApiExample
-from .models import Job, Application, SavedJob, JobAlert, JobSource
+from .models import Job, Application, SavedJob, JobAlert, JobSource, RecommendedJob # Added RecommendedJob
 
 
 @extend_schema_serializer(

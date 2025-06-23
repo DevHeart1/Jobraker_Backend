@@ -2,7 +2,8 @@ from django.urls import reverse
 from rest_framework import status
 from rest_framework.test import APITestCase, APIClient
 from django.contrib.auth import get_user_model
-from apps.jobs.models import Job, RecommendedJob, UserProfile # Assuming UserProfile is needed for user setup
+from apps.jobs.models import Job, RecommendedJob, UserProfile, JobAlert # Added JobAlert
+from apps.jobs.serializers import JobAlertSerializer # Added for JobAlertViewSetTest, though used in class
 import uuid
 
 User = get_user_model()
@@ -134,3 +135,165 @@ class JobRecommendationsViewTests(APITestCase):
         self.assertEqual(results_user2[0]['job']['id'], str(self.job4.id))
 
 # To run these tests: python manage.py test apps.jobs.tests.test_views
+
+
+class JobAlertViewSetTest(APITestCase):
+    def setUp(self):
+        self.user1 = User.objects.create_user(username='user1alert', email='user1alert@example.com', password='password1')
+        self.user2 = User.objects.create_user(username='user2alert', email='user2alert@example.com', password='password2')
+
+        self.alert1_user1 = JobAlert.objects.create(
+            user=self.user1,
+            name="User1 Python Alert",
+            keywords=["Python"],
+            location="Remote"
+        )
+        self.alert2_user1 = JobAlert.objects.create(
+            user=self.user1,
+            name="User1 Java Alert",
+            keywords=["Java"],
+            location="New York"
+        )
+        self.alert1_user2 = JobAlert.objects.create(
+            user=self.user2,
+            name="User2 Go Alert",
+            keywords=["Golang"],
+            location="Remote"
+        )
+
+        self.list_create_url = reverse('jobalert-list') # DRF default router name for list/create
+
+    def test_create_job_alert_authenticated(self):
+        self.client.force_authenticate(user=self.user1)
+        data = {
+            "name": "My New Remote JS Alert",
+            "keywords": ["JavaScript", "React"], # This is a JSONField in the model
+            "location": "Remote",
+            "frequency": "weekly", # Valid choice from model
+            "job_type": "full_time", # Valid choice from Job.JOB_TYPES
+            "experience_level": "mid", # Valid choice from Job.EXPERIENCE_LEVELS
+            "remote_only": True,
+            "is_active": True
+            # min_salary and max_salary are optional
+        }
+        response = self.client.post(self.list_create_url, data, format='json')
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertEqual(JobAlert.objects.count(), 4) # 3 existing + 1 new
+        new_alert = JobAlert.objects.get(id=response.data['id'])
+        self.assertEqual(new_alert.user, self.user1)
+        self.assertEqual(new_alert.name, "My New Remote JS Alert")
+        self.assertEqual(new_alert.keywords, ["JavaScript", "React"]) # Check JSONField data
+        self.assertTrue(new_alert.remote_only)
+
+    def test_create_job_alert_unauthenticated(self):
+        data = {"name": "Unauthorized Alert", "keywords": ["Fail"]}
+        response = self.client.post(self.list_create_url, data, format='json')
+        self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
+
+    def test_list_job_alerts_authenticated_user1(self):
+        self.client.force_authenticate(user=self.user1)
+        response = self.client.get(self.list_create_url)
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+
+        # Assuming default pagination might be active, response.data could be a dict with 'results'
+        results = response.data.get('results', response.data) # Handle paginated or non-paginated response
+
+        self.assertEqual(len(results), 2)
+        response_alert_names = sorted([item['name'] for item in results])
+        expected_alert_names = sorted([self.alert1_user1.name, self.alert2_user1.name])
+        self.assertEqual(response_alert_names, expected_alert_names)
+
+        for alert_data in results:
+            self.assertNotEqual(alert_data['name'], self.alert1_user2.name)
+
+    def test_list_job_alerts_authenticated_user2(self):
+        self.client.force_authenticate(user=self.user2)
+        response = self.client.get(self.list_create_url)
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        results = response.data.get('results', response.data)
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0]['name'], self.alert1_user2.name)
+
+    def test_list_job_alerts_unauthenticated(self):
+        response = self.client.get(self.list_create_url)
+        self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
+
+    def test_retrieve_job_alert_owner(self):
+        self.client.force_authenticate(user=self.user1)
+        detail_url = reverse('jobalert-detail', kwargs={'pk': self.alert1_user1.pk})
+        response = self.client.get(detail_url)
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['name'], self.alert1_user1.name)
+
+    def test_retrieve_job_alert_not_owner(self):
+        self.client.force_authenticate(user=self.user1)
+        detail_url = reverse('jobalert-detail', kwargs={'pk': self.alert1_user2.pk})
+        response = self.client.get(detail_url)
+        # ViewSet's get_queryset filters by user, so non-owned object should result in 404
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_update_job_alert_owner_put(self):
+        self.client.force_authenticate(user=self.user1)
+        detail_url = reverse('jobalert-detail', kwargs={'pk': self.alert1_user1.pk})
+
+        # For PUT, all required fields of the serializer must be provided.
+        # The JobAlertSerializer makes most fields optional or read-only,
+        # but 'name' and 'keywords' are good to test.
+        # From the model: name (CharField), keywords (JSONField), location (CharField),
+        # job_type, experience_level, remote_only, min_salary, max_salary,
+        # frequency, email_notifications, push_notifications, is_active.
+        # Serializer read_only_fields = ('id', 'user', 'created_at', 'updated_at', 'last_run')
+
+        data_for_put = {
+            "name": "User1 Python Alert Updated Via PUT",
+            "keywords": ["Python", "Django"],
+            "location": "Global Remote",
+            "job_type": self.alert1_user1.job_type, # Keep existing
+            "experience_level": self.alert1_user1.experience_level, # Keep existing
+            "remote_only": self.alert1_user1.remote_only, # Keep existing
+            "min_salary": self.alert1_user1.min_salary, # Keep existing
+            "max_salary": self.alert1_user1.max_salary, # Keep existing
+            "frequency": "weekly",
+            "email_notifications": self.alert1_user1.email_notifications,
+            "push_notifications": self.alert1_user1.push_notifications,
+            "is_active": self.alert1_user1.is_active
+        }
+
+        response = self.client.put(detail_url, data_for_put, format='json')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.alert1_user1.refresh_from_db()
+        self.assertEqual(self.alert1_user1.name, "User1 Python Alert Updated Via PUT")
+        self.assertEqual(self.alert1_user1.keywords, ["Python", "Django"])
+        self.assertEqual(self.alert1_user1.frequency, "weekly")
+
+    def test_partial_update_job_alert_owner_patch(self):
+        self.client.force_authenticate(user=self.user1)
+        detail_url = reverse('jobalert-detail', kwargs={'pk': self.alert1_user1.pk})
+        patch_data = {"name": "User1 Python Alert Patched", "is_active": False, "location": "Anywhere"}
+        response = self.client.patch(detail_url, patch_data, format='json')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.alert1_user1.refresh_from_db()
+        self.assertEqual(self.alert1_user1.name, "User1 Python Alert Patched")
+        self.assertFalse(self.alert1_user1.is_active)
+        self.assertEqual(self.alert1_user1.location, "Anywhere")
+
+    def test_delete_job_alert_owner(self):
+        self.client.force_authenticate(user=self.user1)
+        initial_count = JobAlert.objects.filter(user=self.user1).count()
+        detail_url = reverse('jobalert-detail', kwargs={'pk': self.alert1_user1.pk})
+        response = self.client.delete(detail_url)
+        self.assertEqual(response.status_code, status.HTTP_204_NO_CONTENT)
+        self.assertEqual(JobAlert.objects.filter(user=self.user1).count(), initial_count - 1)
+
+    def test_update_job_alert_not_owner(self):
+        self.client.force_authenticate(user=self.user1)
+        detail_url = reverse('jobalert-detail', kwargs={'pk': self.alert1_user2.pk})
+        patch_data = {"name": "Attempt to update other user alert"}
+        response = self.client.patch(detail_url, patch_data, format='json')
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_delete_job_alert_not_owner(self):
+        self.client.force_authenticate(user=self.user1)
+        detail_url = reverse('jobalert-detail', kwargs={'pk': self.alert1_user2.pk})
+        response = self.client.delete(detail_url)
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
