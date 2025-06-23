@@ -70,7 +70,7 @@ def generate_job_embeddings_and_ingest_for_rag(self, job_id: str):
     """
     try:
         from apps.jobs.models import Job
-        from apps.integrations.services.openai_service import EmbeddingService
+        from apps.integrations.services.openai import EmbeddingService # Consolidated
         from apps.common.services import VectorDBService
         
         job = Job.objects.get(id=job_id)
@@ -633,7 +633,7 @@ def get_openai_chat_response_task(self, user_id: int, message: str, conversation
         rag_context_str = ""
         if message: # Use the user's message for RAG query
             try:
-                from apps.integrations.services.openai_service import EmbeddingService
+                from apps.integrations.services.openai import EmbeddingService # Consolidated
                 from apps.common.services import VectorDBService # Using actual service path
 
                 embedding_service = EmbeddingService()
@@ -778,7 +778,7 @@ def analyze_openai_resume_task(self, resume_text: str, target_job: str = "", use
         rag_context_str = ""
         if target_job: # Only fetch RAG context if a target job is specified
             try:
-                from apps.integrations.services.openai_service import EmbeddingService
+                from apps.integrations.services.openai import EmbeddingService # Consolidated
                 from apps.common.services import VectorDBService
 
                 embedding_service = EmbeddingService()
@@ -1149,7 +1149,7 @@ def process_knowledge_article_for_rag_task(self, article_id: int):
     """
     try:
         from apps.common.models import KnowledgeArticle
-        from apps.integrations.services.openai_service import EmbeddingService
+        from apps.integrations.services.openai import EmbeddingService # Consolidated
         from apps.common.services import VectorDBService
 
         article = KnowledgeArticle.objects.get(id=article_id)

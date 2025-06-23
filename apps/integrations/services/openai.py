@@ -363,10 +363,10 @@ class EmbeddingService:
     """
     Service for managing embeddings and semantic search.
     """
-    
-    def __init__(self):
-        self.client = OpenAIClient()
-    
+
+    def __init__(self, client: Optional[OpenAIClient] = None):
+        self.client = client or OpenAIClient()
+
     def generate_job_embeddings(self, job) -> Dict[str, List[float]]:
         """
         Generate embeddings for a job posting.
