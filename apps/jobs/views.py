@@ -176,6 +176,46 @@ class JobViewSet(viewsets.ModelViewSet):
             queryset = queryset.filter(is_remote=is_remote.lower() == 'true')
         
         return queryset.order_by('-posted_date')
+
+    @extend_schema(
+        summary="Generate Interview Questions",
+        description="Queues a task to generate interview questions for this specific job.",
+        tags=['Jobs', 'AI'],
+        request=None, # No request body needed for this version
+        responses={
+            202: OpenApiResponse(
+                response={'type': 'object', 'properties': {'task_id': {'type': 'string'}, 'status': {'type': 'string'}, 'message': {'type': 'string'}}},
+                description="Task successfully queued.",
+                examples=[OpenApiExample('Example Response', value={'task_id': 'some-celery-task-id', 'status': 'queued', 'message': 'Interview question generation has been queued.'})]
+            ),
+            404: ErrorResponseSerializer, # If job not found
+            401: ErrorResponseSerializer  # If not authenticated
+        }
+    )
+    @action(detail=True, methods=['post'], permission_classes=[permissions.IsAuthenticated])
+    def generate_interview_questions(self, request, pk=None):
+        """
+        Triggers an asynchronous task to generate interview questions for the specified job.
+        """
+        from apps.integrations.tasks import generate_interview_questions_task # Local import for clarity
+
+        try:
+            job = self.get_object() # Gets the Job instance based on pk
+        except Job.DoesNotExist: # Should be handled by get_object, but defensive
+            return Response({"error": "Job not found."}, status=status.HTTP_404_NOT_FOUND)
+
+        # Dispatch Celery task
+        # Pass user_id for potential personalization, task handles if user_id is None
+        task = generate_interview_questions_task.delay(job_id=str(job.id), user_id=str(request.user.id))
+
+        return Response(
+            {
+                "task_id": task.id,
+                "status": "queued",
+                "message": "Interview question generation has been queued. You can check the status using the task_id."
+            },
+            status=status.HTTP_202_ACCEPTED
+        )
     
     @extend_schema(
         summary="Save job",
@@ -416,7 +456,7 @@ class JobSearchView(APIView):
         query_params_serializer = JobSearchSerializer(data=request.query_params)
         if not query_params_serializer.is_valid():
             return Response(query_params_serializer.errors, status=status.HTTP_400_BAD_REQUEST)
-        
+
         valid_params = query_params_serializer.validated_data
 
         # --- Text search queries (use 'must' for relevance scoring) ---
