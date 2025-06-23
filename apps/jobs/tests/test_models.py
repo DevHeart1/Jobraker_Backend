@@ -60,3 +60,56 @@ class JobAlertModelTest(TestCase):
         valid_job_type_values = [choice[0] for choice in Job.JOB_TYPES]
         self.assertIn('full_time', valid_job_type_values)
         # Add more checks if necessary
+
+
+from apps.jobs.models import Application # Import Application model
+from django.utils import timezone
+
+class ApplicationModelAdvancedTrackingTest(TestCase):
+    def setUp(self):
+        self.user = User.objects.create_user(username='testappuser', email='testappuser@example.com', password='password')
+        self.job = Job.objects.create(title="Test Job for App", company="Test Co", description="Desc", location="Loc")
+        self.application = Application.objects.create(user=self.user, job=self.job)
+
+    def test_application_new_fields_defaults(self):
+        self.assertIsNone(self.application.user_defined_status)
+        self.assertEqual(self.application.user_notes, "")
+        self.assertEqual(self.application.interview_details, []) # Default is list
+        self.assertEqual(self.application.offer_details, {})   # Default is dict
+        self.assertIsNone(self.application.follow_up_reminder_sent_at)
+        # follow_up_date is already in the model, defaults to None/null
+        self.assertIsNone(self.application.follow_up_date)
+
+    def test_application_user_defined_status_choices(self):
+        self.application.user_defined_status = 'interviewing' # Example valid choice from plan
+        # This test assumes 'interviewing' will be a valid choice.
+        # A more robust test would iterate Application.USER_DEFINED_STATUS_CHOICES
+        # For now, this is a placeholder, actual choices need to be used.
+        # Let's use one of the actual choices I defined:
+        self.application.user_defined_status = Application.USER_DEFINED_STATUS_CHOICES[4][0] # 'initial_interview'
+        self.application.save()
+        self.application.refresh_from_db()
+        self.assertEqual(self.application.user_defined_status, 'initial_interview')
+
+    def test_application_json_fields(self):
+        interview_data = [{"date": "2024-01-01T10:00:00Z", "type": "phone screen", "notes": "Good call."}]
+        offer_data = {"salary": 100000, "bonus": 5000, "start_date": "2024-02-01"}
+
+        self.application.interview_details = interview_data
+        self.application.offer_details = offer_data
+        self.application.save()
+        self.application.refresh_from_db()
+
+        self.assertEqual(self.application.interview_details, interview_data)
+        self.assertEqual(self.application.offer_details, offer_data)
+
+    def test_application_date_fields(self):
+        now = timezone.now()
+        self.application.follow_up_date = now.date()
+        self.application.follow_up_reminder_sent_at = now
+        self.application.save()
+        self.application.refresh_from_db()
+
+        self.assertEqual(self.application.follow_up_date, now.date())
+        # Comparing datetimes can be tricky due to microseconds. Assert they are close.
+        self.assertAlmostEqual(self.application.follow_up_reminder_sent_at, now, delta=timezone.timedelta(seconds=1))

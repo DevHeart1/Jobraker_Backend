@@ -2,8 +2,9 @@ from django.urls import reverse
 from rest_framework import status
 from rest_framework.test import APITestCase, APIClient
 from django.contrib.auth import get_user_model
-from apps.jobs.models import Job, RecommendedJob, UserProfile, JobAlert # Added JobAlert
-from apps.jobs.serializers import JobAlertSerializer # Added for JobAlertViewSetTest, though used in class
+from apps.jobs.models import Job, RecommendedJob, UserProfile, JobAlert, Application # Added Application
+from apps.jobs.serializers import JobAlertSerializer, ApplicationSerializer # Added ApplicationSerializer
+from django.utils import timezone # Added for new tests
 import uuid
 
 User = get_user_model()
@@ -296,4 +297,70 @@ class JobAlertViewSetTest(APITestCase):
         self.client.force_authenticate(user=self.user1)
         detail_url = reverse('jobalert-detail', kwargs={'pk': self.alert1_user2.pk})
         response = self.client.delete(detail_url)
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+
+
+from apps.jobs.models import Application, Job # Already imported Job, add Application if not already for this new class
+from apps.jobs.serializers import ApplicationSerializer # Import ApplicationSerializer for this new class
+
+class ApplicationViewSetAdvancedTrackingTest(APITestCase):
+    def setUp(self):
+        self.user = User.objects.create_user(username='apptrackuser', email='apptrackuser@example.com', password='password')
+        self.job = Job.objects.create(title="Test Job for App Tracking", company="Track Co", description="Desc", location="Loc")
+        self.application = Application.objects.create(
+            user=self.user,
+            job=self.job,
+            status='submitted' # Initial system status
+        )
+        self.client = APIClient() # Already in other test class, but good to have instance here
+        self.client.force_authenticate(user=self.user)
+        self.detail_url = reverse('application-detail', kwargs={'pk': self.application.pk})
+
+    def test_update_application_with_new_tracking_fields(self):
+        patch_data = {
+            "user_defined_status": Application.USER_DEFINED_STATUS_CHOICES[1][0], # 'preparing_application'
+            "user_notes": "Sent them an email, waiting for reply.",
+            "follow_up_date": timezone.now().date() + timezone.timedelta(days=7),
+            "interview_details": [{"date": "2024-08-01T14:00:00Z", "type": "HR Screen", "interviewer": "Jane Doe"}],
+            "offer_details": {"salary": 120000, "equity": "0.1%", "notes": "Standard offer."}
+        }
+        response = self.client.patch(self.detail_url, patch_data, format='json')
+        self.assertEqual(response.status_code, status.HTTP_200_OK, response.data)
+
+        self.application.refresh_from_db()
+        self.assertEqual(self.application.user_defined_status, patch_data["user_defined_status"])
+        self.assertEqual(self.application.user_notes, patch_data["user_notes"])
+        self.assertEqual(self.application.follow_up_date, patch_data["follow_up_date"])
+        self.assertEqual(self.application.interview_details, patch_data["interview_details"])
+        self.assertEqual(self.application.offer_details, patch_data["offer_details"])
+
+    def test_cannot_update_follow_up_reminder_sent_at_via_api(self):
+        # This field should be read-only from the API user's perspective
+        original_sent_at = self.application.follow_up_reminder_sent_at # Should be None initially
+
+        patch_data = {
+            "follow_up_reminder_sent_at": timezone.now()
+        }
+        response = self.client.patch(self.detail_url, patch_data, format='json')
+        self.assertEqual(response.status_code, status.HTTP_200_OK) # The request itself is fine
+
+        self.application.refresh_from_db()
+        # Check that the field was NOT updated, because it's read-only in serializer
+        self.assertEqual(self.application.follow_up_reminder_sent_at, original_sent_at)
+        # Also confirm the response data doesn't allow setting it, or doesn't show it if not readable
+        # (it is readable, so it will be in response.data, but should be its original value)
+        if original_sent_at:
+             self.assertEqual(response.data['follow_up_reminder_sent_at'], original_sent_at.isoformat())
+        else:
+             self.assertIsNone(response.data['follow_up_reminder_sent_at'])
+
+
+    def test_update_application_by_non_owner_fails(self):
+        other_user = User.objects.create_user(username='otheruserapp', email='other@example.com', password='password')
+        self.client.force_authenticate(user=other_user) # Authenticate as a different user
+
+        patch_data = {"user_notes": "Trying to update other user's application."}
+        response = self.client.patch(self.detail_url, patch_data, format='json')
+
+        # ApplicationViewSet's get_queryset filters by user, so this should be a 404
         self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)

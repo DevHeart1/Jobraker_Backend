@@ -250,3 +250,90 @@ def process_job_alerts_task(self):
         "alerts_processed": alerts_processed_count,
         "notifications_sent": notifications_sent_count
     }
+
+
+@shared_task(bind=True, max_retries=3)
+def send_application_follow_up_reminders(self):
+    """
+    Sends follow-up reminders for job applications.
+
+    Checks for applications where the 'follow_up_date' is today or in the past
+    and a reminder has not yet been sent for that specific follow_up_date.
+    """
+    from apps.jobs.models import Application
+    from django.utils import timezone
+    from django.conf import settings
+    from django.core.mail import send_mail
+    from django.db.models import Q, F
+
+    today = timezone.now().date()
+    reminders_sent_count = 0
+    applications_processed_count = 0
+
+    # Query for applications needing a reminder:
+    # - User is active
+    # - follow_up_date is set and is today or in the past
+    # - EITHER follow_up_reminder_sent_at is null (never sent for this follow_up_date)
+    # - OR follow_up_reminder_sent_at is older than the current follow_up_date
+    #   (meaning follow_up_date was changed after last reminder was sent, so a new reminder is due for the new date)
+    applications_to_remind = Application.objects.filter(
+        user__is_active=True,
+        follow_up_date__isnull=False,
+        follow_up_date__lte=today
+    ).filter(
+        Q(follow_up_reminder_sent_at__isnull=True) |
+        Q(follow_up_reminder_sent_at__lt=F('follow_up_date'))
+    ).select_related('user', 'job')
+
+    if not applications_to_remind.exists():
+        logger.info("No applications found requiring follow-up reminders at this time.")
+        return {"status": "no_reminders_due", "sent_count": 0}
+
+    logger.info(f"Found {applications_to_remind.count()} applications for potential follow-up reminders.")
+
+    for app in applications_to_remind:
+        applications_processed_count += 1
+        if not app.user.email:
+            logger.warning(f"User {app.user.id} for Application {app.id} has no email. Skipping reminder.")
+            continue
+
+        try:
+            subject = f"Reminder: Follow up on your application for '{app.job.title}'"
+            message = (
+                f"Hello {app.user.first_name or app.user.username},\n\n"
+                f"This is a reminder to follow up on your job application for the position of "
+                f"'{app.job.title}' at {app.job.company}.\n\n"
+                f"Your scheduled follow-up date was: {app.follow_up_date.strftime('%Y-%m-%d')}\n\n"
+                f"Application notes: {app.user_notes or 'No notes provided.'}\n\n"
+                f"Good luck!\n\nThe Jobraker Team"
+            )
+            # Potentially add link to application details page on the platform
+            # site_url = getattr(settings, 'SITE_URL', '')
+            # if site_url:
+            #     app_detail_url = f"{site_url}/applications/{app.id}/" # Example
+            #     message += f"\nView your application: {app_detail_url}"
+
+
+            send_mail(
+                subject,
+                message,
+                settings.DEFAULT_FROM_EMAIL,
+                [app.user.email],
+                fail_silently=False
+            )
+
+            app.follow_up_reminder_sent_at = timezone.now()
+            app.save(update_fields=['follow_up_reminder_sent_at', 'updated_at'])
+            reminders_sent_count += 1
+            logger.info(f"Sent follow-up reminder for Application {app.id} to User {app.user.id} ({app.user.email}).")
+
+        except Exception as e:
+            logger.error(f"Failed to send follow-up reminder for Application {app.id} to User {app.user.id}: {e}", exc_info=True)
+            # Optionally, self.retry(exc=e) if appropriate for specific errors
+
+    logger.info(f"Finished sending application follow-up reminders. Processed: {applications_processed_count}. Sent: {reminders_sent_count}.")
+    return {
+        "status": "completed",
+        "processed_count": applications_processed_count,
+        "sent_count": reminders_sent_count
+    }
