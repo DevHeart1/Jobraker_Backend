@@ -36,6 +36,7 @@ THIRD_PARTY_APPS = [
     'corsheaders',
     'django_celery_beat',
     'django_celery_results',
+    'django_elasticsearch_dsl', # Added for Elasticsearch
 ]
 
 LOCAL_APPS = [
@@ -217,3 +218,21 @@ JAZZMIN_SETTINGS = {
     'welcome_sign': 'Welcome to Jobraker Admin Panel',
     'copyright': 'Jobraker Inc.',
 }
+
+# Elasticsearch Configuration
+ELASTICSEARCH_URL = os.getenv('ELASTICSEARCH_URL', 'http://localhost:9200')
+
+ELASTICSEARCH_DSL = {
+    'default': {
+        'hosts': ELASTICSEARCH_URL,
+        # 'http_auth': ('username', 'password'), # Optional: if your ES is secured
+        # 'timeout': 30, # Optional: global timeout for requests
+    },
+}
+
+ELASTICSEARCH_JOB_INDEX_NAME = os.getenv('ELASTICSEARCH_JOB_INDEX_NAME', 'jobraker-jobs')
+
+
+# Optional: If you want to auto-sync model updates to Elasticsearch using signals
+# ELASTICSEARCH_DSL_AUTOSYNC = True # Default is False. Manage via signals manually for more control.
+# ELASTICSEARCH_DSL_AUTO_REFRESH = False # Default is False. Controls refresh after auto-sync.

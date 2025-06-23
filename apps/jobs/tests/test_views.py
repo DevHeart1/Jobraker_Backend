@@ -364,3 +364,127 @@ class ApplicationViewSetAdvancedTrackingTest(APITestCase):
 
         # ApplicationViewSet's get_queryset filters by user, so this should be a 404
         self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+
+
+from unittest.mock import patch, MagicMock
+from apps.jobs.documents import JobDocument # For mocking search
+
+class JobSearchViewElasticsearchTest(APITestCase):
+    def setUp(self):
+        self.user = User.objects.create_user(username='essearchuser', email='essearch@example.com', password='password')
+        self.client = APIClient()
+        self.client.force_authenticate(user=self.user)
+        self.search_url = reverse('job_search') # Assuming 'job_search' is the name of JobSearchView URL
+
+        # Create some Job instances in the DB that our mock ES response will point to
+        self.job1 = Job.objects.create(pk=uuid.uuid4(), title="ES Job 1", company="ES Comp A", description=".", location=".")
+        self.job2 = Job.objects.create(pk=uuid.uuid4(), title="ES Job 2", company="ES Comp B", description=".", location=".")
+
+    @patch('apps.jobs.views.JobDocument.search') # Patch the search() class method
+    def test_job_search_view_uses_elasticsearch(self, mock_es_search):
+        # Configure the mock Elasticsearch response
+        mock_es_hit1 = MagicMock()
+        mock_es_hit1.meta.id = str(self.job1.pk) # ES IDs are usually strings
+        # Add other fields to mock_es_hit1._source if serializer uses them directly from ES
+        # For Option B (fetch from DB), only meta.id is strictly needed from hit.
+
+        mock_es_hit2 = MagicMock()
+        mock_es_hit2.meta.id = str(self.job2.pk)
+
+        mock_es_response = MagicMock()
+        mock_es_response.hits = [mock_es_hit1, mock_es_hit2]
+        mock_es_response.hits.total.value = 2
+
+        # The search object 's' itself needs to be a mock that has an execute method
+        mock_search_instance = MagicMock()
+        mock_search_instance.execute.return_value = mock_es_response
+
+        # Configure the chain of calls: JobDocument.search() -> query() -> sort() -> execute()
+        # search(...)[0:50].execute()
+        # We patched JobDocument.search, so it returns our mock_search_instance.
+        # The slicing [0:50] also needs to return the mock_search_instance to chain .execute()
+        mock_es_search.return_value = mock_search_instance
+        mock_search_instance.__getitem__.return_value = mock_search_instance # For slicing [0:50]
+
+        # Make a GET request to the JobSearchView
+        response = self.client.get(self.search_url, {'title': 'ES Job'})
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        mock_es_search.assert_called_once() # Verify JobDocument.search() was called
+
+        # Verify that the execute method on the search object was called
+        mock_search_instance.execute.assert_called_once()
+
+        # Verify the response structure and content (based on JobSearchResultSerializer)
+        self.assertIn('count', response.data)
+        self.assertIn('results', response.data)
+        self.assertEqual(response.data['count'], 2)
+        self.assertEqual(len(response.data['results']), 2)
+
+        # Check if the job titles from the database (fetched via IDs from ES) are in the response
+        result_titles = sorted([item['title'] for item in response.data['results']])
+        expected_titles = sorted([self.job1.title, self.job2.title])
+        self.assertEqual(result_titles, expected_titles)
+
+    @patch('apps.jobs.views.JobDocument.search')
+    def test_job_search_view_handles_es_exception_gracefully(self, mock_es_search):
+        mock_search_instance = MagicMock()
+        mock_search_instance.execute.side_effect = Exception("Elasticsearch connection error")
+        mock_es_search.return_value = mock_search_instance
+        mock_search_instance.__getitem__.return_value = mock_search_instance
+
+        response = self.client.get(self.search_url, {'title': 'Test'})
+
+        self.assertEqual(response.status_code, status.HTTP_503_SERVICE_UNAVAILABLE)
+        self.assertIn('error', response.data)
+        self.assertEqual(response.data['error'], "Search service temporarily unavailable.")
+
+    @patch('apps.jobs.views.JobDocument.search')
+    def test_job_search_view_query_construction(self, mock_es_search):
+        # This test is more involved as it requires inspecting the query sent to ES.
+        # We'll check if specific filters are applied.
+
+        mock_search_instance = MagicMock()
+        mock_es_response = MagicMock()
+        mock_es_response.hits = []
+        mock_es_response.hits.total.value = 0
+        mock_search_instance.execute.return_value = mock_es_response
+
+        # Mock the chain of query building calls
+        mock_es_search.return_value = mock_search_instance
+        mock_search_instance.query.return_value = mock_search_instance
+        mock_search_instance.sort.return_value = mock_search_instance
+        mock_search_instance.__getitem__.return_value = mock_search_instance # For slicing
+
+        # Make a request with various query parameters
+        self.client.get(self.search_url, {
+            'title': 'Developer',
+            'location': 'Remote',
+            'job_type': 'full_time',
+            'is_remote': 'true'
+        })
+
+        mock_es_search.assert_called_once()
+
+        # Check that query() was called on the search instance.
+        # The actual inspection of the ES_Q objects passed to query() is complex.
+        # A simpler check is that query() was called if params were present.
+        self.assertTrue(mock_search_instance.query.called)
+
+        # Example: Check one of the Q objects passed to .query()
+        # This requires knowing the structure of ES_Q objects from elasticsearch-dsl
+        # and how they are passed in the bool query.
+        # For instance, to check if a "match" query for title was part of a "must" clause:
+        # args, kwargs = mock_search_instance.query.call_args
+        # bool_query = args[0] # Assuming the first arg is the ES_Q('bool', ...)
+        # self.assertIn(ES_Q("match", title="Developer"), bool_query.must) # This depends on ES_Q internal structure
+
+        # Check that sort() was called
+        self.assertTrue(mock_search_instance.sort.called)
+        # Example: Check if sorted by '-posted_date'
+        # sort_args, sort_kwargs = mock_search_instance.sort.call_args_list[0] # Get first call to sort
+        # self.assertIn('-posted_date', sort_args)
+
+        # This test provides a basic check that query building methods are invoked.
+        # Deep inspection of Elasticsearch DSL query objects is possible but can be brittle.
+        pass

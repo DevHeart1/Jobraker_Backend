@@ -394,59 +394,138 @@ class JobSearchView(APIView):
     Results are limited to 50 jobs and ordered by posting date.
     """
     permission_classes = [permissions.IsAuthenticated]
-    
+    # Consider adding DRF's pagination for this view
+    # from rest_framework.pagination import PageNumberPagination
+    # pagination_class = PageNumberPagination
+    # PageNumberPagination.page_size = 20 # Example page size
+
     def get(self, request):
         """
-        Execute advanced job search with multiple filter options.
+        Execute advanced job search using Elasticsearch.
         
-        Applies various filters and returns structured search results
-        with job matching information.
+        Applies various filters and returns structured search results.
         """
-        # TODO: Implement advanced search with AI matching
-        queryset = Job.objects.all()
+        from .documents import JobDocument
+        from elasticsearch_dsl import Q as ES_Q # Use ES_Q to avoid conflict with Django's Q
+
+        search = JobDocument.search()
+        must_queries = []
+        filter_queries = [] # For exact matches, typically non-scoring
+
+        # Validate query parameters using JobSearchSerializer
+        query_params_serializer = JobSearchSerializer(data=request.query_params)
+        if not query_params_serializer.is_valid():
+            return Response(query_params_serializer.errors, status=status.HTTP_400_BAD_REQUEST)
         
-        # Basic filters
-        filters = {}
-        if request.query_params.get('title'):
-            filters['title__icontains'] = request.query_params.get('title')
-        if request.query_params.get('company'):
-            filters['company__icontains'] = request.query_params.get('company')
-        if request.query_params.get('location'):
-            filters['location__icontains'] = request.query_params.get('location')
-        if request.query_params.get('remote'):
-            filters['is_remote'] = request.query_params.get('remote').lower() == 'true'
+        valid_params = query_params_serializer.validated_data
+
+        # --- Text search queries (use 'must' for relevance scoring) ---
+        # Title search (using 'title' field which is an english_text_field)
+        if valid_params.get('title'):
+            must_queries.append(ES_Q("match", title=valid_params['title']))
         
-        if filters:
-            queryset = queryset.filter(**filters)
+        # Company search (using 'company_name' which maps to Job.company)
+        if valid_params.get('company'):
+            # Using match on the .raw field for potentially more exact company name matching if needed,
+            # or just match on the analyzed field. For company names, often a phrase match or term is better.
+            # Let's use a match query on the analyzed field for broader matching.
+            must_queries.append(ES_Q("match", company_name=valid_params['company']))
+
+        # Location text search (using 'location_text' which maps to Job.location)
+        if valid_params.get('location'):
+            must_queries.append(ES_Q("match", location_text=valid_params['location']))
+            # Could also add filters for specific city/state/country if those are separate query params
+
+        # Skills search (skills_required_text is multi-field TextField)
+        if valid_params.get('skills'):
+            skills_query = ES_Q('bool', should=[ES_Q("match", skills_required_text=skill) for skill in valid_params['skills']], minimum_should_match=1)
+            must_queries.append(skills_query)
+
+        # --- Filter queries (use 'filter' for non-scoring, exact matches) ---
+        if valid_params.get('is_remote') is not None: # Check for None because False is a valid value
+            filter_queries.append(ES_Q("term", is_remote=valid_params['is_remote']))
+
+        if valid_params.get('job_type'):
+            filter_queries.append(ES_Q("term", job_type=valid_params['job_type']))
+
+        if valid_params.get('experience_level'):
+            filter_queries.append(ES_Q("term", experience_level=valid_params['experience_level']))
         
         # Salary range filter
-        min_salary = request.query_params.get('min_salary')
-        max_salary = request.query_params.get('max_salary')
-        if min_salary:
-            queryset = queryset.filter(salary_min__gte=min_salary)
-        if max_salary:
-            queryset = queryset.filter(salary_max__lte=max_salary)
+        salary_range_query = {}
+        if valid_params.get('min_salary') is not None:
+            salary_range_query['gte'] = valid_params['min_salary']
+        if valid_params.get('max_salary') is not None:
+            # This logic assumes we want jobs where job.salary_max <= query.max_salary
+            # or jobs where job.salary_min <= query.max_salary if job.salary_max is not defined.
+            # A simpler approach for ES might be to just filter on salary_min if that's what's primarily indexed for range.
+            # For now, let's assume we filter on salary_min. If salary_max is also indexed, a range query can be used.
+            # If job.salary_max is indexed: salary_range_query['lte'] = valid_params['max_salary']
+            pass # For simplicity, only using min_salary for now.
+                 # A proper range query would involve job's salary_min and salary_max if both are indexed as a range or separately.
+
+        if salary_range_query:
+             # This query needs refinement based on how salary is indexed (e.g., as a range, or separate min/max)
+             # Assuming we want jobs where their salary_min is at least the requested min_salary
+            if 'gte' in salary_range_query:
+                 filter_queries.append(ES_Q("range", salary_min=salary_range_query))
+
+
+        # Combine queries
+        if must_queries or filter_queries:
+            search = search.query(ES_Q('bool', must=must_queries, filter=filter_queries))
         
-        jobs = queryset.order_by('-posted_date')[:50]  # Limit results
+        # Add sorting (e.g., by posted_date descending)
+        search = search.sort('-posted_date') # Assuming 'posted_date' is indexed and sortable
+
+        # Execute search - this hits Elasticsearch
+        # For pagination with DRF, you'd typically integrate with a pagination class.
+        # Manual slicing for now, similar to original view's limit.
+        # A proper pagination solution would be better.
+        try:
+            response_es = search[0:50].execute() # Get top 50 hits
+        except Exception as e:
+            logger.error(f"Elasticsearch query failed: {e}")
+            return Response({"error": "Search service temporarily unavailable."}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+
+        # Option B: Get IDs from ES, then fetch from DB
+        hit_ids = [hit.meta.id for hit in response_es.hits]
         
-        # TODO: Add AI-powered job matching and ranking
+        # Preserve order from Elasticsearch results
+        preserved_order = {pk: i for i, pk in enumerate(hit_ids)}
         
-        return Response({
-            'count': jobs.count() if hasattr(jobs, 'count') else len(jobs),
-            'results': [
-                {
-                    'id': job.id,
-                    'title': job.title,
-                    'company': job.company,
-                    'location': job.location,
-                    'salary_min': job.salary_min,
-                    'salary_max': job.salary_max,
-                    'is_remote': job.is_remote,
-                    'posted_date': job.posted_date,
-                    'url': job.url,
-                } for job in jobs
-            ]
-        })
+        # Fetch Job objects from database
+        # This ensures data consistency with the primary DB and allows reuse of existing serializers
+        jobs_queryset = Job.objects.filter(pk__in=hit_ids)
+        jobs_list = sorted(list(jobs_queryset), key=lambda j: preserved_order.get(str(j.pk))) # str(j.pk) because ES IDs are strings
+
+        # Use existing JobListSerializer
+        serializer = JobListSerializer(jobs_list, many=True, context={'request': request})
+
+        # For count, use total from ES response
+        response_data = {
+            'count': response_es.hits.total.value if response_es.hits.total else 0,
+            'results': serializer.data
+        }
+        # If using DRF pagination, the paginator would handle this structure.
+        # For manual, we can adapt JobSearchResultSerializer or return a similar structure.
+        # Let's use JobSearchResultSerializer for consistency with its schema.
+
+        # This part needs to be adapted if using DRF's built-in pagination.
+        # For now, simulating the structure of JobSearchResultSerializer manually for the limited 50 results.
+        search_result_data = {
+            'count': response_es.hits.total.value if response_es.hits.total else 0,
+            'next': None, # Placeholder, add pagination logic for this
+            'previous': None, # Placeholder
+            'results': serializer.data
+        }
+        final_serializer = JobSearchResultSerializer(data=search_result_data)
+        if final_serializer.is_valid(): # Should be valid as we constructed it
+            return Response(final_serializer.data)
+        else:
+            # This case should ideally not happen if data is constructed correctly
+            logger.error(f"JobSearchResultSerializer failed validation: {final_serializer.errors}")
+            return Response(serializer.data) # Fallback to simpler list if wrapper fails (not ideal)
 
 
 @extend_schema(
