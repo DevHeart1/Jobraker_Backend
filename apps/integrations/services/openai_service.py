@@ -86,14 +86,16 @@ class OpenAIJobAssistant:
             return {'status': 'error', 'message': 'Failed to queue advice task.'}
 
     def chat_response(
-        self, 
-        user_id: int, 
-        message: str, 
+        self,
+        user_id: int,
+        session_id: int, # Added session_id
+        message: str,
         conversation_history: List[Dict[str, str]] = None,
         user_profile: Dict[str, Any] = None
     ) -> Dict[str, Any]:
         """
         Asynchronously generates AI chat response via Celery.
+        Now requires session_id to be passed to the Celery task.
         The actual OpenAI call is made in the Celery task `get_openai_chat_response_task`.
         """
         from apps.integrations.tasks import get_openai_chat_response_task
@@ -124,14 +126,15 @@ class OpenAIJobAssistant:
         try:
             task = get_openai_chat_response_task.delay(
                 user_id=user_id,
+                session_id=session_id, # Pass session_id
                 message=message,
                 conversation_history=conversation_history,
                 user_profile_data=user_profile_data
             )
-            logger.info(f"Queued get_openai_chat_response_task with ID: {task.id} for user {user_id}")
+            logger.info(f"Queued get_openai_chat_response_task with ID: {task.id} for user {user_id}, session {session_id}")
             return {'status': 'queued', 'task_id': task.id}
         except Exception as e:
-            logger.error(f"Failed to queue get_openai_chat_response_task for user {user_id}: {e}")
+            logger.error(f"Failed to queue get_openai_chat_response_task for user {user_id}, session {session_id}: {e}")
             return {'status': 'error', 'message': 'Failed to queue chat task.'}
 
     def _moderate_text(self, text_to_moderate: str) -> bool:
@@ -351,7 +354,11 @@ def get_job_advice(user_id: int, advice_type: str, context: str = "") -> Dict[st
     return assistant.get_job_advice(user_id, advice_type, context, user_profile)
 
 
-def get_chat_response(user_id: int, message: str, history: List[Dict[str, str]] = None) -> Dict[str, Any]:
+def get_chat_response(user_id: int, session_id: int, message: str, history: List[Dict[str, str]] = None) -> Dict[str, Any]:
     """Convenience function for chat responses."""
+    # This convenience function might need user_profile data if it's commonly used.
+    # For now, just matching the change in chat_response signature.
     assistant = OpenAIJobAssistant()
-    return assistant.chat_response(user_id, message, history)
+    # Assuming user_profile is not typically passed through this specific convenience function.
+    # If it is, this function signature and call would need to be updated.
+    return assistant.chat_response(user_id=user_id, session_id=session_id, message=message, conversation_history=history, user_profile=None)

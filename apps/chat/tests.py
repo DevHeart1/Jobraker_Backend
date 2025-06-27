@@ -166,43 +166,222 @@ class ChatAPITests(APITestCase):
         response = self.client.post(url, data, format='json')
         self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND) # Should be treated as not found for this user
 
-    @patch('apps.integrations.services.openai.OpenAIClient.chat_completion')
-    def test_send_message_openai_integration_success(self, mock_chat_completion):
-        # Configure the mock to return a successful response
-        mock_chat_completion.return_value = "This is a mocked AI response."
+    @patch('apps.integrations.services.openai_service.OpenAIJobAssistant.chat_response')
+    def test_send_message_async_task_queued_successfully(self, mock_assistant_chat_response):
+        # Configure the mock to return a successful task queuing response
+        mock_assistant_chat_response.return_value = {
+            'status': 'queued',
+            'task_id': 'fake_task_id_123'
+        }
 
         self.client.force_authenticate(user=self.user)
         url = reverse('chat')
-        data = {'message_text': 'Hello AI, tell me a joke.'}
+        data = {'message_text': 'Hello AI, process this asynchronously.'}
         response = self.client.post(url, data, format='json')
 
-        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
-        self.assertEqual(ChatMessage.objects.count(), 2) # User message + AI message
+        self.assertEqual(response.status_code, status.HTTP_202_ACCEPTED)
+        self.assertEqual(ChatMessage.objects.filter(sender='user').count(), 1) # User message saved
+        self.assertEqual(ChatMessage.objects.filter(sender='ai').count(), 0) # AI message not saved yet
 
-        ai_message = ChatMessage.objects.get(sender='ai')
-        self.assertEqual(ai_message.message_text, "This is a mocked AI response.")
+        self.assertIn('task_id', response.data)
+        self.assertEqual(response.data['task_id'], 'fake_task_id_123')
+        self.assertIn('user_message', response.data)
+        self.assertEqual(response.data['user_message']['message_text'], 'Hello AI, process this asynchronously.')
 
-        # Verify that chat_completion was called
-        mock_chat_completion.assert_called_once()
-        # You can add more assertions here to check the arguments passed to chat_completion
-        args, kwargs = mock_chat_completion.call_args
-        self.assertIn('messages', kwargs)
-        self.assertTrue(any(msg['role'] == 'user' and msg['content'] == 'Hello AI, tell me a joke.' for msg in kwargs['messages']))
+        # Verify that OpenAIJobAssistant.chat_response was called
+        mock_assistant_chat_response.assert_called_once()
+        args, kwargs = mock_assistant_chat_response.call_args
+        self.assertEqual(kwargs['message'], 'Hello AI, process this asynchronously.')
+        self.assertIsNotNone(kwargs['session_id']) # Check that session_id is passed
 
-    @patch('apps.integrations.services.openai.OpenAIClient.chat_completion')
-    def test_send_message_openai_integration_api_error(self, mock_chat_completion):
-        # Configure the mock to simulate an API error
-        mock_chat_completion.side_effect = Exception("OpenAI API Error")
+    @patch('apps.integrations.services.openai_service.OpenAIJobAssistant.chat_response')
+    def test_send_message_async_task_queue_failure(self, mock_assistant_chat_response):
+        # Configure the mock to simulate a failure in task queuing (e.g., moderation failed)
+        mock_assistant_chat_response.return_value = {
+            'status': 'error',
+            'message': 'Input violates content guidelines.',
+            'error_code': 'flagged_input'
+        }
 
         self.client.force_authenticate(user=self.user)
         url = reverse('chat')
-        data = {'message_text': 'Query that might cause an error.'}
+        data = {'message_text': 'A message that would fail moderation.'}
         response = self.client.post(url, data, format='json')
 
-        self.assertEqual(response.status_code, status.HTTP_201_CREATED) # Still 201 as we handle the error internally
-        self.assertEqual(ChatMessage.objects.count(), 2) # User message + AI placeholder message
+        # Assuming 500 for general task queue failure, or could be 422 if specifically handled
+        self.assertEqual(response.status_code, status.HTTP_500_INTERNAL_SERVER_ERROR)
+        self.assertEqual(ChatMessage.objects.filter(sender='user').count(), 1) # User message still saved
+        self.assertEqual(ChatMessage.objects.filter(sender='ai').count(), 0)
 
-        ai_message = ChatMessage.objects.get(sender='ai')
-        self.assertEqual(ai_message.message_text, "Default AI response: Could not connect to AI service.")
+        self.assertIn('error', response.data)
+        self.assertEqual(response.data['error'], 'Input violates content guidelines.')
+        self.assertEqual(response.data['error_code'], 'flagged_input')
+        mock_assistant_chat_response.assert_called_once()
 
-        mock_chat_completion.assert_called_once()
+# Tests for the Celery Task
+from apps.integrations.tasks import get_openai_chat_response_task
+# Note: To test Celery tasks directly, ensure CELERY_TASK_ALWAYS_EAGER=True in test settings.
+# This is typically set in jobraker/settings/testing.py
+
+class ChatCeleryTaskTests(APITestCase):
+    def setUp(self):
+        self.user = User.objects.create_user(username='taskuser', email='task@example.com', password='password123')
+        self.session = ChatSession.objects.create(user=self.user, title='Celery Task Test Session')
+        # Create an initial user message in the session for history context
+        ChatMessage.objects.create(session=self.session, sender='user', message_text='Initial user message for history.')
+
+    @patch('openai.ChatCompletion.create') # Mock the actual OpenAI API call within the task
+    def test_get_openai_chat_response_task_success(self, mock_openai_create):
+        # Configure the mock for openai.ChatCompletion.create
+        mock_openai_create.return_value = MagicMock(
+            choices=[MagicMock(message=MagicMock(content="Mocked AI response from task."))]
+        )
+
+        # Mock moderation calls within the task to always pass
+        with patch('openai.Moderation.create') as mock_moderation:
+            mock_moderation.return_value = MagicMock(results=[MagicMock(flagged=False)])
+
+            # Simulate calling the task
+            # The task expects user_id, session_id, message, conversation_history, user_profile_data
+            user_message_text = "Tell me about Celery."
+
+            # Construct history as the task expects (list of dicts)
+            # The task internally fetches history, but the signature accepts it.
+            # For this test, we'll rely on the task's internal history fetching logic.
+            # The `OpenAIJobAssistant.chat_response` prepares this history.
+            # The task receives this prepared history.
+            # Let's simulate the history that would be passed.
+            prepared_history = [{"role": "user", "content": "Initial user message for history."}]
+
+            task_result = get_openai_chat_response_task.run(
+                user_id=self.user.id,
+                session_id=self.session.id,
+                message=user_message_text,
+                conversation_history=prepared_history,
+                user_profile_data=None
+            )
+
+        self.assertTrue(task_result['success'])
+        self.assertEqual(task_result['response'], "Mocked AI response from task.")
+        self.assertTrue(task_result.get('message_saved'))
+
+        # Verify AI message was saved to DB
+        ai_messages = ChatMessage.objects.filter(session=self.session, sender='ai')
+        self.assertEqual(ai_messages.count(), 1)
+        self.assertEqual(ai_messages.first().message_text, "Mocked AI response from task.")
+
+        mock_openai_create.assert_called_once()
+        # Further assertions on mock_openai_create.call_args can be added
+        # Check that moderation was called for user input and AI output
+        self.assertEqual(mock_moderation.call_count, 2)
+
+
+    @patch('openai.ChatCompletion.create')
+    def test_get_openai_chat_response_task_openai_api_error(self, mock_openai_create):
+        mock_openai_create.side_effect = Exception("Simulated OpenAI API Error")
+
+        with patch('openai.Moderation.create') as mock_moderation:
+            mock_moderation.return_value = MagicMock(results=[MagicMock(flagged=False)])
+
+            with self.assertRaises(Exception): # Celery task will re-raise for retry
+                get_openai_chat_response_task.run(
+                    user_id=self.user.id,
+                    session_id=self.session.id,
+                    message="A message that will cause error.",
+                    conversation_history=[],
+                    user_profile_data=None
+                )
+
+        # Verify no new AI message was saved
+        self.assertEqual(ChatMessage.objects.filter(session=self.session, sender='ai').count(), 0)
+        mock_openai_create.assert_called_once()
+
+    def test_get_openai_chat_response_task_session_not_found(self):
+        # No mocking needed for OpenAI call as it shouldn't be reached
+        task_result = get_openai_chat_response_task.run(
+            user_id=self.user.id,
+            session_id=99999, # Non-existent session
+            message="Test message",
+            conversation_history=[],
+            user_profile_data=None
+        )
+        self.assertTrue(task_result['success']) # The task itself might succeed but report an error
+        self.assertEqual(task_result['error'], 'session_not_found_for_saving_message')
+        self.assertNotIn('message_saved', task_result)
+
+
+    @patch('openai.ChatCompletion.create') # Mock the actual OpenAI API call
+    def test_get_openai_chat_response_task_input_moderation_failure(self, mock_openai_create):
+        # Moderation for user input fails
+        with patch('openai.Moderation.create') as mock_moderation:
+            # First call (user input) is flagged, second (AI output) is not (or not reached)
+            mock_moderation.side_effect = [
+                MagicMock(results=[MagicMock(flagged=True)]),
+                MagicMock(results=[MagicMock(flagged=False)])
+            ]
+
+            task_result = get_openai_chat_response_task.run(
+                user_id=self.user.id,
+                session_id=self.session.id,
+                message="Flagged user message.",
+                conversation_history=[],
+                user_profile_data=None
+            )
+
+        self.assertFalse(task_result['success'])
+        self.assertEqual(task_result['error'], 'flagged_input')
+        mock_openai_create.assert_not_called() # OpenAI chat completion should not be called
+        # Verify no new AI message was saved
+        self.assertEqual(ChatMessage.objects.filter(session=self.session, sender='ai').count(), 0)
+
+
+    @patch('openai.ChatCompletion.create') # Mock the actual OpenAI API call
+    def test_get_openai_chat_response_task_output_moderation_failure(self, mock_openai_create):
+        mock_openai_create.return_value = MagicMock(
+            choices=[MagicMock(message=MagicMock(content="Flagged AI response."))]
+        )
+        # Moderation for user input passes, AI output is flagged
+        with patch('openai.Moderation.create') as mock_moderation:
+            mock_moderation.side_effect = [
+                MagicMock(results=[MagicMock(flagged=False)]), # User input OK
+                MagicMock(results=[MagicMock(flagged=True)])  # AI output Flagged
+            ]
+
+            task_result = get_openai_chat_response_task.run(
+                user_id=self.user.id,
+                session_id=self.session.id,
+                message="User message leading to flagged AI output.",
+                conversation_history=[],
+                user_profile_data=None
+            )
+
+        self.assertFalse(task_result['success'])
+        self.assertEqual(task_result['error'], 'flagged_ai_output') # Corrected error code
+        mock_openai_create.assert_called_once()
+        # Verify no new AI message was saved (because it was flagged)
+        # The current task implementation saves *then* moderates AI output.
+        # This test assumes the task might prevent saving if AI output is flagged.
+        # Based on current task logic, it saves then returns error, so this check might need adjustment
+        # if the task's behavior is to save the flagged message or a placeholder.
+        # For now, let's assume the task *would not* save a message it deems problematic.
+        # If the task *does* save it and then reports, this test needs to change.
+        # The current task code returns an error if AI output is flagged, but *after* trying to save.
+        # Let's adjust: the task as written saves the AI message *before* AI output moderation.
+        # This is a flaw in the task. For this test, let's assume the ideal where it wouldn't save.
+        # To make this test pass with current task logic:
+        # self.assertEqual(ChatMessage.objects.filter(session=self.session, sender='ai').count(), 1)
+        # self.assertEqual(ChatMessage.objects.filter(session=self.session, sender='ai').first().message_text, "Flagged AI response.")
+        # However, the task *should* ideally not save a message that is then flagged.
+        # For now, this test will reflect the ideal. If the task is not changed, this test will fail.
+        # The task *actually* saves before AI output moderation. So, a message *would* be saved.
+        # Let's assume the task logic should be: moderate AI output, then save if not flagged.
+        # The current task does: generate AI -> moderate AI -> save AI. This is slightly off.
+        # It should be generate AI -> moderate AI -> if not flagged, save AI.
+        # The task actually does: generate AI -> save AI -> moderate AI (this is what I see in current task code for user input mod, then AI gen, then AI output mod, then save)
+        # Let me re-check the task code structure for saving.
+        # The task saves AI message *after* AI output moderation. This is correct.
+        # So, if AI output is flagged, it should not be saved.
+        self.assertEqual(ChatMessage.objects.filter(session=self.session, sender='ai').count(), 0)
+
+# Need to import MagicMock if not already done (it's part of unittest.mock)
+from unittest.mock import MagicMock

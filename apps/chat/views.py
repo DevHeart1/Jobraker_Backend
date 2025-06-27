@@ -117,43 +117,32 @@ class ChatMessageRequestSerializer(serializers.Serializer):
     """Serializer for the request body of ChatView."""
     message_text = serializers.CharField()
     session_id = serializers.IntegerField(required=False, allow_null=True)
+    # session_id is now effectively required if user wants to continue a specific chat,
+    # but can be omitted to start a new one.
 
     def validate_message_text(self, value):
         if not value.strip():
             raise serializers.ValidationError("Message cannot be empty.")
         return value
 
+class ChatMessageAcceptedResponseSerializer(serializers.Serializer):
+    """Serializer for the 202 Accepted response from ChatView."""
+    task_id = serializers.CharField()
+    session_id = serializers.IntegerField()
+    user_message = ChatMessageSerializer() # Re-use ChatMessageSerializer for the user's message
+    detail = serializers.CharField()
+
+
 @extend_schema(
-    summary="Send chat message",
-    description="Send a message to the AI chat assistant. If session_id is provided, the message is added to that session. Otherwise, a new session is created.",
+    summary="Send chat message (Asynchronous)",
+    description="Send a message to the AI chat assistant. If session_id is provided, the message is added to that session. Otherwise, a new session is created. The AI response is processed asynchronously.",
     tags=['Chat'],
     request=ChatMessageRequestSerializer,
     responses={
-        201: OpenApiExample( # Changed to 201 as new messages are created
-            'AI Response',
-            summary='AI assistant response and user message',
-            description='Returns the user message and the (simulated) AI response, along with session ID.',
-            value={
-                "session_id": 123,
-                "user_message": {
-                    "id": 1,
-                    "session": 123,
-                    "sender": "user",
-                    "message_text": "Can you help me improve my resume?",
-                    "created_at": "2025-06-16T08:30:00Z"
-                },
-                "ai_response": {
-                    "id": 2,
-                    "session": 123,
-                    "sender": "ai",
-                    "message_text": "AI response will be here.",
-                    "created_at": "2025-06-16T08:30:05Z"
-                }
-            }
-        ),
-        400: OpenApiExample(
+        status.HTTP_222_ACCEPTED: ChatMessageAcceptedResponseSerializer,
+        status.HTTP_400_BAD_REQUEST: OpenApiExample(
             'Bad Request',
-            value={'message_text': ['This field is required.']},
+            value={'message_text': ['This field is required.']}, # Example, could also be from ChatMessageRequestSerializer directly
             response_only=True
         ),
         401: OpenApiExample(
@@ -161,11 +150,18 @@ class ChatMessageRequestSerializer(serializers.Serializer):
             value={'detail': 'Authentication credentials were not provided.'},
             response_only=True
         ),
-        404: OpenApiExample(
+        status.HTTP_404_NOT_FOUND: OpenApiExample(
             'Session Not Found',
             value={'detail': 'Chat session not found or does not belong to user.'},
             response_only=True
+        ),
+        status.HTTP_500_INTERNAL_SERVER_ERROR: OpenApiExample(
+            'Task Queuing Failed',
+            value={'error': 'Failed to queue AI processing task.', 'error_code': 'task_queue_failed'},
+            response_only=True
         )
+        # Potentially a 422 if input is flagged by moderation before queuing
+        # status.HTTP_422_UNPROCESSABLE_ENTITY: OpenApiExample(...)
     }
 )
 class ChatView(APIView):
@@ -226,65 +222,65 @@ class ChatView(APIView):
         # or by the ChatSession model's auto_now=True on updated_at if a message save triggers session save.
         # Explicitly save session to ensure updated_at is current if no signals are set up for that.
 
-        # --- OpenAI Integration ---
-        from apps.integrations.services.openai import OpenAIClient
-        open_ai_client = OpenAIClient()
+        # --- OpenAI Integration (Now Asynchronous via Celery) ---
+        from apps.integrations.services.openai_service import OpenAIJobAssistant
+        from django.conf import settings # For OPENAI_MODEL setting
 
-        # Construct conversation history for OpenAI
-        history_messages = session.messages.order_by('created_at').all() # Get all messages for context
-        # Limit history to avoid overly long prompts, e.g., last 10 messages (5 user, 5 AI)
-        # More sophisticated context management can be added later.
-        MAX_HISTORY_MESSAGES = 10
-        recent_history = history_messages.order_by('-created_at')[:MAX_HISTORY_MESSAGES:-1] # fetch last N, then reverse to chronological
+        # Construct conversation history for the assistant
+        # This history should represent the state *before* the current user_chat_message was added,
+        # as the task will receive the current message separately.
+        # Let's fetch messages older than the current user_chat_message.
+        MAX_HISTORY_MESSAGES_FOR_PROMPT = 10
+        conversation_history_for_prompt = list(
+            session.messages.filter(created_at__lt=user_chat_message.created_at)
+            .order_by('-created_at')[:MAX_HISTORY_MESSAGES_FOR_PROMPT]
+            .values('sender', 'message_text')
+        )[::-1] # Reverse to maintain chronological order for the prompt
 
-        openai_messages = [{"role": "system", "content": "You are a helpful AI job assistant."}]
-        for msg in recent_history:
-            openai_messages.append({"role": msg.sender, "content": msg.message_text})
-        # The user's current message (user_chat_message) is the last one in the history for the API call
+        # Prepare user profile data (simplified for now)
+        # TODO: Enhance user profile data extraction
+        user_profile_data_for_assistant = None
+        if hasattr(request.user, 'profile'):
+            profile = request.user.profile
+            user_profile_data_for_assistant = {
+                'experience_level': getattr(profile, 'experience_level', ''),
+                'skills': list(getattr(profile, 'skills', []))
+                # Add other relevant fields from UserProfile as needed by the assistant/task
+            }
 
-        ai_response_text = "Default AI response: Could not connect to AI service."
-        try:
-            # The user_chat_message is already saved, so it's part of `recent_history` if MAX_HISTORY_MESSAGES is large enough
-            # or it's the latest message. The prompt should be the user's *new* message.
-            # Let's ensure the history sent to OpenAI includes the latest user message.
-            current_openai_prompt_messages = [{"role": "system", "content": "You are a helpful AI job assistant."}]
-            for msg_obj in recent_history: # recent_history includes the user_chat_message if correctly fetched
-                 current_openai_prompt_messages.append({"role": msg_obj.sender, "content": msg_obj.message_text})
-
-
-            if not any(m['role'] == 'user' and m['content'] == user_chat_message.message_text for m in current_openai_prompt_messages):
-                 # This case should ideally not happen if history fetching is correct
-                 # but as a safeguard, ensure the current user message is included.
-                 current_openai_prompt_messages.append({"role": "user", "content": user_chat_message.message_text})
-
-
-            ai_response_text = open_ai_client.chat_completion(
-                messages=current_openai_prompt_messages, # Pass the constructed list of message dicts
-                model=getattr(settings, 'OPENAI_MODEL', 'gpt-4o-mini') # Use model from settings
-            )
-        except Exception as e:
-            # Log the error, e.g., logger.error(f"OpenAI API call failed: {e}")
-            # Keep the default error message for the user for now
-            print(f"Error calling OpenAI: {e}") # Basic logging for now
-            pass # ai_response_text remains the default error message
-
-        ai_chat_message = ChatMessage.objects.create(
-            session=session,
-            sender='ai',
-            message_text=ai_response_text
+        assistant = OpenAIJobAssistant()
+        task_submission_result = assistant.chat_response(
+            user_id=request.user.id,
+            session_id=session.id,
+            message=user_chat_message.message_text, # The new user message
+            conversation_history=conversation_history_for_prompt,
+            user_profile=user_profile_data_for_assistant
         )
         # --- End OpenAI Integration ---
 
-        session.save() # Ensures updated_at is refreshed after AI message too.
+        session.save() # Ensures user_chat_message saving updates session's updated_at
 
         user_message_data = ChatMessageSerializer(user_chat_message).data
-        ai_response_data = ChatMessageSerializer(ai_chat_message).data
-        
-        return Response({
-            'session_id': session.id,
-            'user_message': user_message_data,
-            'ai_response': ai_response_data
-        }, status=status.HTTP_201_CREATED)
+
+        if task_submission_result.get('status') == 'queued':
+            return Response({
+                'task_id': task_submission_result.get('task_id'),
+                'session_id': session.id,
+                'user_message': user_message_data,
+                'detail': "AI is processing your message. The response will appear shortly."
+            }, status=status.HTTP_222_ACCEPTED) # HTTP 202 Accepted
+        else:
+            # Handle failure to queue the task (e.g., Celery not running, moderation failure)
+            error_message = task_submission_result.get('message', 'Failed to queue AI processing task.')
+            error_code = task_submission_result.get('error_code', 'task_queue_failed')
+            # Log this server-side error
+            # logger.error(f"Failed to queue OpenAI task for session {session.id}: {error_message}") # Assuming logger is configured
+            return Response({
+                'session_id': session.id,
+                'user_message': user_message_data, # Still return the saved user message
+                'error': error_message,
+                'error_code': error_code
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR) # Or a more specific error like 422 if input flagged
 
 
 # TODO: [Feature Enhancement] Implement JobAdviceView
