@@ -653,6 +653,52 @@ class TestSkyvernTasks(unittest.TestCase):
         self.assertEqual(result["error"], "Application for Skyvern task not found")
         self.mock_skyvern_submissions_total.labels(status='check_app_not_found').inc.assert_called_once()
 
+    def test_check_skyvern_task_status_task_skyvern_canceled(self):
+        skyvern_task_id = "sky_canceled_789"
+        app_id = str(uuid.uuid4())
+        mock_app_instance = MockApplication(id=app_id, skyvern_task_id=skyvern_task_id)
+        self.MockApplicationModel.objects.get.return_value = mock_app_instance
+        skyvern_api_response = {"status": "CANCELED", "reason": "User request"}
+        self.mock_skyvern_client_instance.get_task_status.return_value = skyvern_api_response
+
+        result = integration_tasks.check_skyvern_task_status_task(skyvern_task_id, app_id)
+
+        self.assertEqual(result["skyvern_status"], "CANCELED")
+        self.assertEqual(mock_app_instance.status, 'skyvern_canceled')
+        self.assertEqual(mock_app_instance.skyvern_response_data, skyvern_api_response)
+        mock_app_instance.save.assert_called_once_with(update_fields=['status', 'updated_at', 'skyvern_response_data'])
+        self.mock_skyvern_submissions_total.labels(status='canceled').inc.assert_called_once()
+
+    def test_check_skyvern_task_status_task_skyvern_requires_attention(self):
+        skyvern_task_id = "sky_attention_101"
+        app_id = str(uuid.uuid4())
+        mock_app_instance = MockApplication(id=app_id, skyvern_task_id=skyvern_task_id)
+        self.MockApplicationModel.objects.get.return_value = mock_app_instance
+        skyvern_api_response = {"status": "REQUIRES_ATTENTION", "details": "CAPTCHA detected"}
+        self.mock_skyvern_client_instance.get_task_status.return_value = skyvern_api_response
+
+        result = integration_tasks.check_skyvern_task_status_task(skyvern_task_id, app_id)
+
+        self.assertEqual(result["skyvern_status"], "REQUIRES_ATTENTION")
+        self.assertEqual(mock_app_instance.status, 'skyvern_requires_attention')
+        self.assertEqual(mock_app_instance.skyvern_response_data, skyvern_api_response)
+        mock_app_instance.save.assert_called_once_with(update_fields=['status', 'updated_at', 'skyvern_response_data'])
+        self.mock_skyvern_submissions_total.labels(status='requires_attention').inc.assert_called_once()
+
+    def test_check_skyvern_task_status_task_skyvern_pending(self):
+        skyvern_task_id = "sky_pending_112"
+        app_id = str(uuid.uuid4())
+        # Start with a different status to see if it changes to 'submitting_via_skyvern'
+        mock_app_instance = MockApplication(id=app_id, skyvern_task_id=skyvern_task_id, status='pending')
+        self.MockApplicationModel.objects.get.return_value = mock_app_instance
+        self.mock_skyvern_client_instance.get_task_status.return_value = {"status": "PENDING"}
+
+        result = integration_tasks.check_skyvern_task_status_task(skyvern_task_id, app_id)
+
+        self.assertEqual(result["skyvern_status"], "PENDING")
+        self.assertEqual(mock_app_instance.status, 'submitting_via_skyvern') # Should update if not already this
+        mock_app_instance.save.assert_called_once_with(update_fields=['status', 'updated_at'])
+        # No specific submission total metric change for PENDING/RUNNING after initial 'initiated'
 
     def test_retrieve_skyvern_task_results_task_success(self):
         skyvern_task_id = "sky_789"

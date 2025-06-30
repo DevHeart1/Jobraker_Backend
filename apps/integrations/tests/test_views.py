@@ -171,6 +171,81 @@ class TestSkyvernWebhookView(TestCase):
         self.assertEqual(mock_app_instance.status, 'skyvern_submission_failed')
         self.assertEqual(mock_app_instance.skyvern_response_data, error_payload)
 
+    def test_webhook_status_skyvern_canceled(self, mock_logger_getLogger, MockApplicationCls):
+        mock_logger = mock_logger_getLogger.return_value
+        task_id = "sky_task_canceled_123"
+        app_id = "app_uuid_canceled_123"
+        mock_app_instance = MockApplicationInstance(id=app_id, skyvern_task_id=task_id)
+        self.mock_app_manager._get_return_value = mock_app_instance
+
+        payload_data = {"reason": "User initiated cancellation"}
+        payload = {"task_id": task_id, "status": "CANCELED", "data": payload_data}
+        payload_bytes = json.dumps(payload).encode('utf-8')
+        signature = self._generate_signature(payload_bytes, "testsecret")
+
+        response = self.client.post(self.webhook_url, data=payload_bytes, content_type="application/json", HTTP_X_SKYVERN_SIGNATURE=signature)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.json().get("application_updated"))
+        self.assertEqual(mock_app_instance.status, 'skyvern_canceled')
+        self.assertEqual(mock_app_instance.skyvern_response_data, {"status_reason": "canceled", "details": payload_data})
+
+    def test_webhook_status_skyvern_requires_attention(self, mock_logger_getLogger, MockApplicationCls):
+        mock_logger = mock_logger_getLogger.return_value
+        task_id = "sky_task_attention_123"
+        app_id = "app_uuid_attention_123"
+        mock_app_instance = MockApplicationInstance(id=app_id, skyvern_task_id=task_id)
+        self.mock_app_manager._get_return_value = mock_app_instance
+
+        payload_data = {"message": "CAPTCHA required"}
+        payload = {"task_id": task_id, "status": "REQUIRES_ATTENTION", "data": payload_data}
+        payload_bytes = json.dumps(payload).encode('utf-8')
+        signature = self._generate_signature(payload_bytes, "testsecret")
+
+        response = self.client.post(self.webhook_url, data=payload_bytes, content_type="application/json", HTTP_X_SKYVERN_SIGNATURE=signature)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.json().get("application_updated"))
+        self.assertEqual(mock_app_instance.status, 'skyvern_requires_attention')
+        self.assertEqual(mock_app_instance.skyvern_response_data, payload_data)
+
+    def test_webhook_status_skyvern_pending_updates_if_needed(self, mock_logger_getLogger, MockApplicationCls):
+        mock_logger = mock_logger_getLogger.return_value
+        task_id = "sky_task_pending_123"
+        app_id = "app_uuid_pending_123"
+        # Start with an initial 'pending' status to see if it changes to 'submitting_via_skyvern'
+        mock_app_instance = MockApplicationInstance(id=app_id, skyvern_task_id=task_id, status='pending')
+        self.mock_app_manager._get_return_value = mock_app_instance
+
+        payload = {"task_id": task_id, "status": "PENDING"}
+        payload_bytes = json.dumps(payload).encode('utf-8')
+        signature = self._generate_signature(payload_bytes, "testsecret")
+
+        response = self.client.post(self.webhook_url, data=payload_bytes, content_type="application/json", HTTP_X_SKYVERN_SIGNATURE=signature)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.json().get("application_updated")) # Status changed
+        self.assertEqual(mock_app_instance.status, 'submitting_via_skyvern')
+
+    def test_webhook_status_skyvern_running_no_change_if_already_submitting(self, mock_logger_getLogger, MockApplicationCls):
+        mock_logger = mock_logger_getLogger.return_value
+        task_id = "sky_task_running_123"
+        app_id = "app_uuid_running_123"
+        # Start with 'submitting_via_skyvern'
+        mock_app_instance = MockApplicationInstance(id=app_id, skyvern_task_id=task_id, status='submitting_via_skyvern')
+        self.mock_app_manager._get_return_value = mock_app_instance
+
+        payload = {"task_id": task_id, "status": "RUNNING"}
+        payload_bytes = json.dumps(payload).encode('utf-8')
+        signature = self._generate_signature(payload_bytes, "testsecret")
+
+        response = self.client.post(self.webhook_url, data=payload_bytes, content_type="application/json", HTTP_X_SKYVERN_SIGNATURE=signature)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(response.json().get("application_updated")) # Status did not change
+        self.assertEqual(mock_app_instance.status, 'submitting_via_skyvern')
+
+
     # Add more tests for other statuses like CANCELED, REQUIRES_ATTENTION, PENDING/RUNNING if different logic applies
     # Add test for MultipleObjectsReturned if that's a concern.
     def test_webhook_multiple_applications_returned(self, mock_logger_getLogger, MockApplicationCls):
