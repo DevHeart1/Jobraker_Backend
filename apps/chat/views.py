@@ -3,109 +3,116 @@ from rest_framework import viewsets, permissions, status
 from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.views import APIView
-from drf_spectacular.utils import extend_schema, extend_schema_view, OpenApiParameter, OpenApiExample
+from drf_spectacular.utils import extend_schema, extend_schema_view, OpenApiParameter, OpenApiExample, OpenApiResponse
 from drf_spectacular.openapi import OpenApiTypes
+from .models import ChatSession, ChatMessage # Import models
+from .serializers import ( # Import serializers
+    ChatSessionSerializer, ChatSessionListSerializer, ChatSessionCreateSerializer,
+    ChatMessageSerializer
+)
+# Assuming StandardResultsSetPagination is defined elsewhere, e.g., in a project-wide paginators.py
+# from jobraker.paginators import StandardResultsSetPagination # Example path
+
+# Placeholder for pagination if not defined globally
+from rest_framework.pagination import PageNumberPagination
+class StandardResultsSetPagination(PageNumberPagination):
+    page_size = 10
+    page_size_query_param = 'page_size'
+    max_page_size = 100
 
 
 @extend_schema_view(
     list=extend_schema(
-        summary="List chat sessions",
-        description="Retrieve all chat sessions for the current user",
+        summary="List User's Chat Sessions",
+        description="Retrieve a paginated list of chat sessions for the authenticated user, ordered by most recent activity.",
         tags=['Chat'],
         responses={
-            200: OpenApiExample(
-                'Chat Sessions',
-                summary='List of user chat sessions',
-                description='All chat sessions with metadata',
-                value={
-                    "sessions": [
-                        {
-                            "id": "session_123",
-                            "title": "Job Search Help",
-                            "created_at": "2025-06-15T10:00:00Z",
-                            "last_message_at": "2025-06-15T10:30:00Z",
-                            "message_count": 15
-                        }
-                    ],
-                    "total_sessions": 1
-                }
-            ),
-            401: OpenApiExample(
-                'Unauthorized',
-                value={'error': 'Authentication required'},
-                response_only=True
-            )
+            200: ChatSessionListSerializer(many=True), # Use ChatSessionListSerializer
+            401: OpenApiResponse(description="Authentication required", examples=[OpenApiExample('Unauthorized', value={'detail': 'Authentication credentials were not provided.'})])
         }
     ),
     create=extend_schema(
-        summary="Create chat session",
-        description="Start a new chat session with the AI assistant",
+        summary="Create New Chat Session",
+        description="Start a new chat session with the AI assistant. A title is optional.",
         tags=['Chat'],
-        request=OpenApiExample(
-            'New Chat Session',
-            summary='Create new chat session',
-            description='Optional title for the chat session',
-            value={
-                "title": "Resume Review Help"
-            }
-        ),
+        request=ChatSessionCreateSerializer, # Use ChatSessionCreateSerializer for request
         responses={
-            201: OpenApiExample(
-                'Chat Session Created',
-                summary='New chat session created',
-                description='Chat session details',
-                value={
-                    "session_id": "session_456",
-                    "title": "Resume Review Help",
-                    "created_at": "2025-06-16T08:00:00Z",
-                    "message": "Chat session created successfully"
-                }
-            ),
-            400: OpenApiExample(
-                'Bad Request',
-                value={'error': 'Invalid session data'},
-                response_only=True
-            )
+            201: ChatSessionSerializer, # Return full session details on create
+            400: OpenApiResponse(description="Validation Error", examples=[OpenApiExample('Bad Request', value={'title': ['This field may not be blank.']})]),
+            401: OpenApiResponse(description="Authentication required")
         }
-    )
+    ),
+    retrieve=extend_schema(
+        summary="Retrieve Chat Session",
+        description="Get details of a specific chat session, including its messages.",
+        tags=['Chat'],
+        responses={
+            200: ChatSessionSerializer, # Full detail with messages
+            404: OpenApiResponse(description="Not Found"),
+            401: OpenApiResponse(description="Authentication required")
+        }
+    ),
+    # Standard update/destroy are less common for sessions, usually handled by archiving or auto-cleanup.
+    # For now, we'll rely on ModelViewSet defaults if needed, or can disable them.
+    # Example: Disabling update/partial_update/destroy if not desired on this ViewSet directly
+    # update=extend_schema(exclude=True),
+    # partial_update=extend_schema(exclude=True),
+    # destroy=extend_schema(exclude=True),
 )
 class ChatSessionViewSet(viewsets.ModelViewSet):
     """
     ViewSet for managing AI chat sessions.
     
-    Handles chat session lifecycle:
-    - Create new chat sessions for different topics
-    - List user's chat history and sessions
-    - Manage session metadata and context
-    - Archive or delete old sessions
+    Allows users to:
+    - Create new chat sessions.
+    - List their existing chat sessions.
+    - Retrieve a specific session with its message history.
     
-    Each session maintains conversation context for better AI responses.
+    Sessions are ordered by the most recent message.
     """
+    queryset = ChatSession.objects.all() # Base queryset
     permission_classes = [permissions.IsAuthenticated]
-    
-    def list(self, request):
+    pagination_class = StandardResultsSetPagination # Add pagination
+
+    def get_serializer_class(self):
+        if self.action == 'list':
+            return ChatSessionListSerializer
+        elif self.action == 'create':
+            return ChatSessionCreateSerializer
+        # For retrieve (and potentially update/partial_update if enabled)
+        return ChatSessionSerializer
+
+    def get_queryset(self):
         """
-        List all chat sessions for the current user.
-        
-        Returns sessions ordered by last activity.
+        This view should return a list of all chat sessions
+        for the currently authenticated user.
         """
-        # TODO: Implement chat session listing
-        return Response({
-            'message': 'Chat session listing coming soon',
-            'sessions': []
-        })
-    
-    def create(self, request):
+        return ChatSession.objects.filter(user=self.request.user).order_by('-last_message_at', '-updated_at')
+
+    def perform_create(self, serializer):
         """
-        Create a new chat session with optional title.
-        
-        Initializes a new conversation context for AI interactions.
+        Associate the chat session with the current user upon creation.
+        Also sets initial last_message_at.
         """
-        # TODO: Implement chat session creation
-        return Response({
-            'message': 'Chat session creation coming soon',
-            'session_id': 'placeholder'
-        })
+        from django.utils import timezone # Local import for clarity
+        serializer.save(user=self.request.user, last_message_at=timezone.now())
+        logger.info(f"ChatSession created for user {self.request.user.id} with title '{serializer.instance.title}'.")
+
+    # Standard list and create actions are provided by ModelViewSet.
+    # We've customized get_queryset and perform_create.
+    # The `list` method implementation is now handled by ModelViewSet + get_queryset + get_serializer_class.
+    # The `create` method implementation is now handled by ModelViewSet + perform_create + get_serializer_class.
+
+    # If you need custom logic beyond what perform_create offers for the create action:
+    # def create(self, request, *args, **kwargs):
+    #     serializer = self.get_serializer(data=request.data)
+    #     serializer.is_valid(raise_exception=True)
+    #     self.perform_create(serializer) # This calls our perform_create above
+    #     # Customize response if needed, default is to return serialized object with 201
+    #     headers = self.get_success_headers(serializer.data)
+    #     # Return the full ChatSessionSerializer data on create
+    #     full_session_serializer = ChatSessionSerializer(serializer.instance, context=self.get_serializer_context())
+    #     return Response(full_session_serializer.data, status=status.HTTP_201_CREATED, headers=headers)
 
 
 @extend_schema(
