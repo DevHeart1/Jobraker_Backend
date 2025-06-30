@@ -177,6 +177,51 @@ class TestVectorDBService(unittest.TestCase):
         self.assertAlmostEqual(results[0]['similarity_score'], expected_score_doc1, places=4)
 
     @patch('apps.common.services.L2Distance')
+    def test_search_similar_documents_score_clamping(self, mock_l2distance_class):
+        """Test similarity score clamping for extreme L2 distances."""
+        mock_query_embedding = [0.5]*1536
+        mock_qs = MagicMock()
+        self.MockModelClass.objects.all.return_value = mock_qs
+        mock_qs.annotate.return_value = mock_qs
+        mock_qs.order_by.return_value = mock_qs
+
+        # Test case 1: Perfect match (distance 0)
+        doc_perfect = MockVectorDocument(id=1, text_content="perfect match")
+        doc_perfect.distance = 0.0
+        # Test case 2: Opposite (distance 2 for normalized vectors)
+        doc_opposite = MockVectorDocument(id=2, text_content="opposite match")
+        doc_opposite.distance = 2.0
+        # Test case 3: Distance slightly > 2 (e.g. due to float issues, should still clamp)
+        doc_far = MockVectorDocument(id=3, text_content="far match")
+        doc_far.distance = 2.1
+
+        mock_qs.__getitem__.return_value = [doc_perfect, doc_opposite, doc_far]
+        mock_l2distance_instance = MagicMock()
+        mock_l2distance_class.return_value = mock_l2distance_instance
+
+        results = self.service.search_similar_documents(mock_query_embedding, top_n=3)
+
+        self.assertEqual(len(results), 3)
+        # Score for L2 distance 0.0: 1 - (0/2) = 1.0. Scaled: (1+1)/2 = 1.0 (if using raw cosine)
+        # Current formula: cosine_similarity = 1 - (L2Distance^2 / 2)
+        # For distance 0: score = 1 - (0/2) = 1.0
+        self.assertAlmostEqual(results[0]['similarity_score'], 1.0, places=4)
+
+        # Score for L2 distance 2.0: 1 - (4/2) = -1.0. (This is raw cosine)
+        # The service's score_0_to_1 = (similarity_score + 1) / 2 in score_job_for_user
+        # But VectorDBService search_similar_documents uses:
+        # cosine_similarity = 1 - (l2_distance_squared / 2)
+        # similarity_score = max(0.0, min(1.0, cosine_similarity)) <--- THIS IS THE KEY
+        # So, for distance 2.0, l2_distance_squared = 4. cosine_similarity = 1 - (4/2) = -1.
+        # similarity_score = max(0.0, min(1.0, -1.0)) = 0.0
+        self.assertAlmostEqual(results[1]['similarity_score'], 0.0, places=4)
+
+        # Score for L2 distance 2.1: 1 - (2.1^2 / 2) = 1 - (4.41/2) = 1 - 2.205 = -1.205
+        # similarity_score = max(0.0, min(1.0, -1.205)) = 0.0
+        self.assertAlmostEqual(results[2]['similarity_score'], 0.0, places=4)
+
+
+    @patch('apps.common.services.L2Distance')
     def test_search_similar_documents_with_filters(self, mock_l2distance_class):
         mock_query_embedding = [0.5]*1536
         mock_qs_all = MagicMock()
@@ -403,6 +448,83 @@ class TestSkyvernAPIClient(unittest.TestCase):
 
         # Check metric for CB state change to OPEN
         self.mock_skyvern_cb_metric.labels(new_state='OPEN').inc.assert_called()
+
+
+    @skyvern_patch('time.sleep') # To avoid actual sleep from backoff
+    @skyvern_patch('time.monotonic')
+    def test_make_request_retries_on_specific_http_errors(self, mock_monotonic, mock_sleep):
+        # Configure monotonic for circuit breaker if it interacts
+        mock_monotonic.side_effect = [1, 2, 3, 4, 5, 6] # Ensure time progresses for CB if needed
+
+        # Simulate a 500 error twice, then a success
+        self.mock_session_instance.post.side_effect = [
+            MockSkyvernResponse(500, text_data="Internal Server Error"),
+            MockSkyvernResponse(500, text_data="Internal Server Error"),
+            MockSkyvernResponse(200, json_data={"task_id": "retried_task"})
+        ]
+
+        response = self.client.run_task("retry_prompt", {}) # Calls _make_request with POST
+
+        self.assertIsNotNone(response)
+        self.assertEqual(response["task_id"], "retried_task")
+        self.assertEqual(self.mock_session_instance.post.call_count, 3) # Original call + 2 retries
+        # Check that appropriate error metrics were NOT incremented for final success,
+        # but API calls metric reflects the final success.
+        self.mock_skyvern_api_calls.labels(endpoint='/run-task', status_code='200').inc.assert_called_once()
+        self.mock_skyvern_api_errors.labels(endpoint='/run-task', error_type='HTTPError').inc.assert_not_called() # Because it eventually succeeded
+
+    @skyvern_patch('time.sleep')
+    @skyvern_patch('time.monotonic')
+    def test_circuit_breaker_half_open_to_closed(self, mock_monotonic, mock_sleep):
+        # --- 1. Open the Circuit Breaker ---
+        self.mock_session_instance.post.side_effect = requests.exceptions.ConnectionError("Simulated connection error")
+        # Configure monotonic for initial failures
+        time_sequence = [i for i in range(1, self.client.CB_MAX_FAILURES + 2)]
+        mock_monotonic.side_effect = time_sequence
+
+        for _ in range(self.client.CB_MAX_FAILURES):
+            self.client.run_task("prompt_to_open_cb", {})
+
+        self.assertEqual(self.client._cb_state, "OPEN") # Assuming we can inspect state for test
+        self.mock_skyvern_cb_metric.labels(new_state='OPEN').inc.assert_called()
+        last_failure_time_for_open = self.client.CB_MAX_FAILURES # From mock_monotonic sequence
+
+        # --- 2. Wait for Reset Timeout & Transition to HALF_OPEN ---
+        # Simulate time passing beyond the reset timeout
+        time_sequence_for_half_open = [
+            last_failure_time_for_open + self.client.CB_RESET_TIMEOUT_SECONDS + 1, # For check that allows HALF_OPEN
+        ]
+        # Add times for successful calls in HALF_OPEN state
+        time_sequence_for_half_open.extend([time_sequence_for_half_open[-1] + i for i in range(1, self.client.CB_HALF_OPEN_MAX_REQUESTS + 2)])
+        mock_monotonic.side_effect = time_sequence_for_half_open
+
+        # This call should transition state to HALF_OPEN if enough time has passed
+        # and then succeed. We need to mock the actual API call to succeed now.
+        successful_response_data = {"task_id": "half_open_success"}
+
+        # Setup session mock for successful calls during HALF_OPEN
+        # The first call after timeout check, then CB_HALF_OPEN_MAX_REQUESTS successful calls
+        self.mock_session_instance.post.side_effect = [
+            MockSkyvernResponse(200, json_data=successful_response_data)
+            for _ in range(self.client.CB_HALF_OPEN_MAX_REQUESTS +1) # One to open, others to close
+        ]
+
+        # First call attempts to move to HALF_OPEN and succeeds
+        response = self.client.run_task("prompt_half_open_1", {})
+        self.assertEqual(response, successful_response_data)
+        self.assertEqual(self.client._cb_state, "HALF_OPEN") # Check internal state
+        self.mock_skyvern_cb_metric.labels(new_state='HALF_OPEN').inc.assert_called_once()
+
+        # Subsequent successful calls to close the circuit
+        for i in range(self.client.CB_HALF_OPEN_MAX_REQUESTS -1): # Already made one successful call
+             response = self.client.run_task(f"prompt_half_open_succ_{i+2}", {})
+             self.assertEqual(response, successful_response_data)
+             if i < self.client.CB_HALF_OPEN_MAX_REQUESTS - 2: # Before the last one that closes it
+                 self.assertEqual(self.client._cb_state, "HALF_OPEN")
+
+        self.assertEqual(self.client._cb_state, "CLOSED") # Should be closed now
+        self.mock_skyvern_cb_metric.labels(new_state='CLOSED').inc.assert_called_once()
+        self.assertEqual(self.client._cb_failures, 0)
 
 
 if __name__ == '__main__':
