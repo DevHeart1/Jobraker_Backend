@@ -1,275 +1,203 @@
-from django.shortcuts import render
-from rest_framework import viewsets, permissions, status
+from django.shortcuts import get_object_or_404
+from django.utils import timezone
+from rest_framework import viewsets, permissions, status, serializers
 from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.views import APIView
-from drf_spectacular.utils import extend_schema, extend_schema_view, OpenApiParameter, OpenApiExample, OpenApiResponse
-from drf_spectacular.openapi import OpenApiTypes
-from .models import ChatSession, ChatMessage # Import models
-from .serializers import ( # Import serializers
-    ChatSessionSerializer, ChatSessionListSerializer, ChatSessionCreateSerializer,
+from rest_framework.pagination import PageNumberPagination
+from drf_spectacular.utils import extend_schema, extend_schema_view, OpenApiExample, OpenApiResponse
+from .models import ChatSession, ChatMessage
+from .serializers import (
+    ChatSessionSerializer,
+    ChatSessionListSerializer,
+    ChatSessionCreateSerializer,
     ChatMessageSerializer
 )
-# Assuming StandardResultsSetPagination is defined elsewhere, e.g., in a project-wide paginators.py
-# from jobraker.paginators import StandardResultsSetPagination # Example path
 
-# Placeholder for pagination if not defined globally
-from rest_framework.pagination import PageNumberPagination
+# Optional: for job-specific advice views later
+# from apps.accounts.serializers import UserSerializer
+
+
+# --- Pagination Class ---
 class StandardResultsSetPagination(PageNumberPagination):
     page_size = 10
     page_size_query_param = 'page_size'
     max_page_size = 100
 
 
+# --- ChatSession ViewSet ---
 @extend_schema_view(
     list=extend_schema(
-        summary="List User's Chat Sessions",
-        description="Retrieve a paginated list of chat sessions for the authenticated user, ordered by most recent activity.",
-        tags=['Chat'],
+        summary="List Chat Sessions",
+        description="Retrieve all chat sessions for the current user, ordered by most recent activity.",
+        tags=["Chat"],
         responses={
-            200: ChatSessionListSerializer(many=True), # Use ChatSessionListSerializer
-            401: OpenApiResponse(description="Authentication required", examples=[OpenApiExample('Unauthorized', value={'detail': 'Authentication credentials were not provided.'})])
+            200: ChatSessionListSerializer(many=True),
+            401: OpenApiResponse(description="Authentication required")
         }
     ),
     create=extend_schema(
-        summary="Create New Chat Session",
-        description="Start a new chat session with the AI assistant. A title is optional.",
-        tags=['Chat'],
-        request=ChatSessionCreateSerializer, # Use ChatSessionCreateSerializer for request
+        summary="Create Chat Session",
+        description="Start a new chat session. Title is optional.",
+        tags=["Chat"],
+        request=ChatSessionCreateSerializer,
         responses={
-            201: ChatSessionSerializer, # Return full session details on create
-            400: OpenApiResponse(description="Validation Error", examples=[OpenApiExample('Bad Request', value={'title': ['This field may not be blank.']})]),
+            201: ChatSessionSerializer,
+            400: OpenApiResponse(description="Validation Error"),
             401: OpenApiResponse(description="Authentication required")
         }
     ),
     retrieve=extend_schema(
         summary="Retrieve Chat Session",
-        description="Get details of a specific chat session, including its messages.",
-        tags=['Chat'],
+        description="Get full details of a chat session, including all messages.",
+        tags=["Chat"],
         responses={
-            200: ChatSessionSerializer, # Full detail with messages
+            200: ChatSessionSerializer,
             404: OpenApiResponse(description="Not Found"),
             401: OpenApiResponse(description="Authentication required")
         }
-    ),
-    # Standard update/destroy are less common for sessions, usually handled by archiving or auto-cleanup.
-    # For now, we'll rely on ModelViewSet defaults if needed, or can disable them.
-    # Example: Disabling update/partial_update/destroy if not desired on this ViewSet directly
-    # update=extend_schema(exclude=True),
-    # partial_update=extend_schema(exclude=True),
-    # destroy=extend_schema(exclude=True),
+    )
 )
 class ChatSessionViewSet(viewsets.ModelViewSet):
     """
-    ViewSet for managing AI chat sessions.
-    
-    Allows users to:
-    - Create new chat sessions.
-    - List their existing chat sessions.
-    - Retrieve a specific session with its message history.
-    
-    Sessions are ordered by the most recent message.
+    ViewSet for managing chat sessions.
     """
-    queryset = ChatSession.objects.all() # Base queryset
     permission_classes = [permissions.IsAuthenticated]
-    pagination_class = StandardResultsSetPagination # Add pagination
+    pagination_class = StandardResultsSetPagination
+
+    def get_queryset(self):
+        return ChatSession.objects.filter(user=self.request.user).order_by('-last_message_at', '-updated_at')
 
     def get_serializer_class(self):
         if self.action == 'list':
             return ChatSessionListSerializer
         elif self.action == 'create':
             return ChatSessionCreateSerializer
-        # For retrieve (and potentially update/partial_update if enabled)
         return ChatSessionSerializer
 
-    def get_queryset(self):
-        """
-        This view should return a list of all chat sessions
-        for the currently authenticated user.
-        """
-        return ChatSession.objects.filter(user=self.request.user).order_by('-last_message_at', '-updated_at')
-
     def perform_create(self, serializer):
-        """
-        Associate the chat session with the current user upon creation.
-        Also sets initial last_message_at.
-        """
-        from django.utils import timezone # Local import for clarity
         serializer.save(user=self.request.user, last_message_at=timezone.now())
-        logger.info(f"ChatSession created for user {self.request.user.id} with title '{serializer.instance.title}'.")
 
-    # Standard list and create actions are provided by ModelViewSet.
-    # We've customized get_queryset and perform_create.
-    # The `list` method implementation is now handled by ModelViewSet + get_queryset + get_serializer_class.
-    # The `create` method implementation is now handled by ModelViewSet + perform_create + get_serializer_class.
 
-    # If you need custom logic beyond what perform_create offers for the create action:
-    # def create(self, request, *args, **kwargs):
-    #     serializer = self.get_serializer(data=request.data)
-    #     serializer.is_valid(raise_exception=True)
-    #     self.perform_create(serializer) # This calls our perform_create above
-    #     # Customize response if needed, default is to return serialized object with 201
-    #     headers = self.get_success_headers(serializer.data)
-    #     # Return the full ChatSessionSerializer data on create
-    #     full_session_serializer = ChatSessionSerializer(serializer.instance, context=self.get_serializer_context())
-    #     return Response(full_session_serializer.data, status=status.HTTP_201_CREATED, headers=headers)
+# --- Chat Message Sending View ---
+class ChatMessageRequestSerializer(serializers.Serializer):
+    message_text = serializers.CharField()
+    session_id = serializers.UUIDField(required=False, allow_null=True)
+
+    def validate_message_text(self, value):
+        if not value.strip():
+            raise serializers.ValidationError("Message cannot be empty.")
+        return value
+
+
+class ChatMessageAcceptedResponseSerializer(serializers.Serializer):
+    task_id = serializers.CharField()
+    session_id = serializers.UUIDField()
+    user_message = ChatMessageSerializer()
+    detail = serializers.CharField()
 
 
 @extend_schema(
-    summary="Send chat message",
-    description="Send a message to the AI chat assistant for job-related help",
-    tags=['Chat'],
-    request=OpenApiExample(
-        'Chat Message',
-        summary='Send message to AI assistant',
-        description='Message with optional session context',
-        value={
-            "message": "Can you help me improve my resume for a Python developer position?",
-            "session_id": "session_123"
-        }
-    ),
+    summary="Send Message (Async)",
+    description="Send a message to the assistant. If `session_id` is not provided, a new session will be created.",
+    tags=["Chat"],
+    request=ChatMessageRequestSerializer,
     responses={
-        200: OpenApiExample(
-            'AI Response',
-            summary='AI assistant response',
-            description='Response from AI with job advice',
-            value={
-                "user_message": "Can you help me improve my resume for a Python developer position?",
-                "ai_response": "I'd be happy to help you improve your resume for a Python developer position. Here are some key recommendations...",
-                "session_id": "session_123",
-                "message_id": "msg_789",
-                "timestamp": "2025-06-16T08:30:00Z"
-            }
-        ),
-        400: OpenApiExample(
-            'Bad Request',
-            value={'error': 'Message is required'},
-            response_only=True
-        ),
-        401: OpenApiExample(
-            'Unauthorized',
-            value={'error': 'Authentication required'},
-            response_only=True
-        )
+        222: ChatMessageAcceptedResponseSerializer,
+        400: OpenApiResponse(description="Validation Error"),
+        401: OpenApiResponse(description="Authentication required"),
+        404: OpenApiResponse(description="Session not found"),
+        500: OpenApiResponse(description="Failed to queue AI task")
     }
 )
 class ChatView(APIView):
-    """
-    AI-powered job assistance chat interface.
-    
-    Provides intelligent job search and career guidance through:
-    - Resume review and optimization suggestions
-    - Interview preparation and practice questions
-    - Salary negotiation advice
-    - Job market insights and trends
-    - Application strategy recommendations
-    - Career path guidance
-    
-    Maintains conversation context for personalized responses.
-    """
     permission_classes = [permissions.IsAuthenticated]
-    
+
     def post(self, request):
-        """
-        Send a message to the AI assistant and receive guidance.
-        
-        The AI assistant can help with various job-related topics
-        using context from the user's profile and job market data.
-        """
-        message = request.data.get('message', '')
-        session_id = request.data.get('session_id')
-        
-        if not message:
-            return Response(
-                {'error': 'Message is required'}, 
-                status=status.HTTP_400_BAD_REQUEST
-            )
-        
-        # TODO: Implement AI chat response using OpenAI integration
-        # This would:
-        # 1. Process the user message
-        # 2. Get context from user profile and job data
-        # 3. Generate AI response using OpenAI
-        # 4. Store conversation history
-        
-        return Response({
-            'message': 'AI chat coming soon',
-            'user_message': message,
-            'ai_response': 'Hello! I\'m your AI job assistant. This feature is coming soon.',
-            'session_id': session_id or 'new_session'
-        })
+        serializer = ChatMessageRequestSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
+        user = request.user
+        session = None
 
+        if data.get('session_id'):
+            session = get_object_or_404(ChatSession, id=data['session_id'], user=user)
+        else:
+            session = ChatSession.objects.create(user=user, title="New Chat", last_message_at=timezone.now())
 
-@extend_schema(
-    summary="Get job advice",
-    description="Get AI-powered personalized job advice and recommendations",
-    tags=['Chat'],
-    request=OpenApiExample(
-        'Job Advice Request',
-        summary='Request specific job advice',
-        description='Request advice for specific job-related topics',
-        value={
-            "type": "resume",
-            "context": "I'm applying for senior Python developer positions and need help with my technical skills section"
-        }
-    ),
-    responses={
-        200: OpenApiExample(
-            'Job Advice Response',
-            summary='Personalized job advice',
-            description='AI-generated advice based on user context',
-            value={
-                "advice_type": "resume",
-                "advice": "For senior Python developer positions, highlight your experience with frameworks like Django/Flask, database technologies, cloud platforms, and any leadership or mentoring experience...",
-                "recommendations": [
-                    "Include specific technologies and versions",
-                    "Quantify your achievements with metrics",
-                    "Highlight leadership and collaboration skills"
-                ],
-                "generated_at": "2025-06-16T08:45:00Z"
-            }
-        ),
-        400: OpenApiExample(
-            'Bad Request',
-            value={'error': 'Invalid advice type'},
-            response_only=True
-        ),
-        401: OpenApiExample(
-            'Unauthorized',
-            value={'error': 'Authentication required'},
-            response_only=True
+        user_msg = ChatMessage.objects.create(
+            session=session,
+            role='user',
+            content=data['message_text']
         )
+
+        # --- Simulated AI Response Placeholder ---
+        ChatMessage.objects.create(
+            session=session,
+            role='assistant',
+            content=f"AI response placeholder for: {data['message_text']}"
+        )
+
+        # --- OpenAI Integration via Celery ---
+        from apps.integrations.services.openai_service import OpenAIJobAssistant
+
+        history = list(
+            session.messages.filter(timestamp__lt=user_msg.timestamp)
+            .order_by('-timestamp')[:10]
+            .values('role', 'content')
+        )[::-1]
+
+        profile_data = None
+        if hasattr(user, 'profile'):
+            profile = user.profile
+            profile_data = {
+                "experience_level": getattr(profile, 'experience_level', ''),
+                "skills": list(getattr(profile, 'skills', []))
+            }
+
+        assistant = OpenAIJobAssistant()
+        result = assistant.chat_response(
+            user_id=user.id,
+            session_id=session.id,
+            message=user_msg.content,
+            conversation_history=history,
+            user_profile=profile_data
+        )
+
+        session.save()
+
+        if result.get("status") == "queued":
+            return Response({
+                "task_id": result.get("task_id"),
+                "session_id": session.id,
+                "user_message": ChatMessageSerializer(user_msg).data,
+                "detail": "AI is processing your message..."
+            }, status=222)
+        else:
+            return Response({
+                "session_id": session.id,
+                "user_message": ChatMessageSerializer(user_msg).data,
+                "error": result.get("message", "Unknown error."),
+                "error_code": result.get("error_code", "task_queue_failed")
+            }, status=500)
+
+
+# --- Placeholder for Future Advice Feature ---
+@extend_schema(
+    summary="[COMING SOON] Get AI Job Advice",
+    description="Get structured AI guidance on resume, interview, salary, and job strategies. [Not yet implemented]",
+    tags=["Chat - Future"],
+    deprecated=True,
+    responses={
+        501: OpenApiResponse(description="Not implemented"),
+        401: OpenApiResponse(description="Unauthorized")
     }
 )
 class JobAdviceView(APIView):
-    """
-    AI-powered personalized job advice and recommendations.
-    
-    Provides specialized guidance for different job search aspects:
-    - Resume: Optimization tips and content suggestions
-    - Interview: Preparation strategies and practice questions
-    - Salary: Negotiation tactics and market data
-    - Applications: Strategy and timing recommendations
-    - Skills: Development priorities and learning paths
-    - Networking: Connection building and relationship tips
-    
-    Uses user profile data and job market insights for personalization.
-    """
     permission_classes = [permissions.IsAuthenticated]
-    
+
     def post(self, request):
-        """
-        Get personalized job advice for specific topics.
-        
-        Analyzes user context and provides tailored recommendations
-        based on their profile, experience, and career goals.
-        """
-        question_type = request.data.get('type', 'general')  # resume, interview, salary, etc.
-        context = request.data.get('context', '')
-        
-        # TODO: Implement AI-powered job advice
-        return Response({
-            'message': 'AI job advice coming soon',
-            'advice_type': question_type,
-            'advice': 'Personalized job advice will be available soon!'
-        })
+        return Response(
+            {"detail": "This feature (Job Advice) is not yet implemented."},
+            status=501
+        )

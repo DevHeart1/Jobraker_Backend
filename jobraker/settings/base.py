@@ -36,6 +36,7 @@ THIRD_PARTY_APPS = [
     'corsheaders',
     'django_celery_beat',
     'django_celery_results',
+    'django_elasticsearch_dsl', # Added for Elasticsearch
 ]
 
 LOCAL_APPS = [
@@ -197,6 +198,14 @@ ADZUNA_APP_ID = os.getenv('ADZUNA_APP_ID', '')
 ADZUNA_API_KEY = os.getenv('ADZUNA_API_KEY', '')
 SKYVERN_API_KEY = os.getenv('SKYVERN_API_KEY', '')
 
+# Pinecone Configuration
+PINECONE_API_KEY = os.getenv('PINECONE_API_KEY', None)
+PINECONE_ENVIRONMENT = os.getenv('PINECONE_ENVIRONMENT', None)
+PINECONE_INDEX_NAME = os.getenv('PINECONE_INDEX_NAME', 'jobraker-default-index')
+PINECONE_NAMESPACE = os.getenv('PINECONE_NAMESPACE', 'jobraker-default-ns') # Default namespace for Pinecone
+PINECONE_INDEX_DIMENSION = int(os.getenv('PINECONE_INDEX_DIMENSION', '1536')) # Default dimension for embeddings
+PINECONE_INDEX_METRIC = os.getenv('PINECONE_INDEX_METRIC', 'cosine') # Default metric for embeddings
+
 # Security Configuration
 CORS_ALLOWED_ORIGINS = os.getenv('CORS_ALLOWED_ORIGINS', '').split(',') if os.getenv('CORS_ALLOWED_ORIGINS') else []
 CORS_ALLOW_CREDENTIALS = True
@@ -209,3 +218,21 @@ JAZZMIN_SETTINGS = {
     'welcome_sign': 'Welcome to Jobraker Admin Panel',
     'copyright': 'Jobraker Inc.',
 }
+
+# Elasticsearch Configuration
+ELASTICSEARCH_URL = os.getenv('ELASTICSEARCH_URL', 'http://localhost:9200')
+
+ELASTICSEARCH_DSL = {
+    'default': {
+        'hosts': ELASTICSEARCH_URL,
+        # 'http_auth': ('username', 'password'), # Optional: if your ES is secured
+        # 'timeout': 30, # Optional: global timeout for requests
+    },
+}
+
+ELASTICSEARCH_JOB_INDEX_NAME = os.getenv('ELASTICSEARCH_JOB_INDEX_NAME', 'jobraker-jobs')
+
+
+# Optional: If you want to auto-sync model updates to Elasticsearch using signals
+# ELASTICSEARCH_DSL_AUTOSYNC = True # Default is False. Manage via signals manually for more control.
+# ELASTICSEARCH_DSL_AUTO_REFRESH = False # Default is False. Controls refresh after auto-sync.

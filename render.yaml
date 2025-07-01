@@ -1,0 +1,218 @@
+# Render Blueprint Spec: https://render.com/docs/blueprint-spec
+# This file defines the services and infrastructure for deploying the Jobraker application on Render.
+
+# Environment variable defaults that can be overridden in the Render dashboard or per service.
+# It's good practice to define common environment variables here, especially non-sensitive ones.
+# Sensitive ones (API keys, passwords) should be set directly in the Render dashboard.
+envVariables:
+  - key: PYTHON_VERSION
+    value: "3.11" # Specify your desired Python version
+  - key: DJANGO_SETTINGS_MODULE
+    value: jobraker.settings.production
+  - key: PYTHONUNBUFFERED # Recommended for seeing logs in real-time
+    value: "1"
+  # Placeholder for sensitive keys - SET THESE IN RENDER DASHBOARD
+  - key: DJANGO_SECRET_KEY
+    # value: generate_a_strong_secret_key # Example: use `python -c 'from django.core.management.utils import get_random_secret_key; print(get_random_secret_key())'`
+    sync: false # Do not sync this example value if Render supports it
+  - key: DATABASE_URL
+    # value: postgresql://user:password@host:port/dbname # Provided by Render's PostgreSQL service
+    sync: false
+  - key: REDIS_URL
+    # value: redis://host:port # Provided by Render's Redis service
+    sync: false
+  - key: OPENAI_API_KEY
+    sync: false
+  - key: ADZUNA_APP_ID
+    sync: false
+  - key: ADZUNA_API_KEY
+    sync: false
+  - key: SKYVERN_API_KEY
+    sync: false
+  - key: PINECONE_API_KEY
+    sync: false
+  - key: PINECONE_ENVIRONMENT
+    sync: false
+  - key: PINECONE_INDEX_NAME
+    value: jobraker-prod-index # Example, can be overridden
+  - key: PINECONE_NAMESPACE
+    value: jobraker-prod-ns   # Example, can be overridden
+  - key: PINECONE_INDEX_DIMENSION
+    value: "1536"
+  - key: PINECONE_INDEX_METRIC
+    value: cosine
+  - key: DJANGO_ALLOWED_HOSTS # e.g., .onrender.com,your_custom_domain.com
+    sync: false
+  - key: SENTRY_DSN # Optional, for Sentry error tracking
+    sync: false
+  # Add other environment variables as needed, e.g., for email backend if used.
+
+services:
+  # PostgreSQL Database (Managed by Render)
+  - type: pserv # Private Service (Database)
+    name: database
+    image: # Not needed for Render managed PostgreSQL, this is an example if using a custom DB image
+      name: postgres:15 # Or your desired version
+    disk:
+      name: jobraker-db-disk
+      sizeGB: 10 # Adjust as needed
+      mountPath: /var/lib/postgresql/data
+    envVars:
+      - key: POSTGRES_DB
+        value: jobraker_prod_db
+      - key: POSTGRES_USER
+        value: jobraker_user
+      - key: POSTGRES_PASSWORD
+        generateValue: true # Render will generate a secure password
+    # Note: For Render's managed PostgreSQL, you typically create it via the dashboard
+    # and then link its DATABASE_URL to your application services.
+    # The above is more illustrative if you were to define a DB service directly in yaml.
+    # For Render's managed service, you'd typically just have:
+    # - type: pserv
+    #   name: database
+    #   plan: standard # or your chosen plan
+    #   postgres:
+    #     version: "15" # Or desired version
+    # And then use its connection string in your app's DATABASE_URL env var.
+    # For simplicity, assuming a managed DB is created outside and linked via DATABASE_URL.
+
+  # Redis Cache & Celery Broker (Managed by Render)
+  - type: pserv # Private Service (Redis)
+    name: redis
+    image: # Not needed for Render managed Redis
+      name: redis:7 # Or your desired version
+    # Similar to PostgreSQL, for Render's managed Redis:
+    # - type: pserv
+    #   name: redis
+    #   plan: standard # or your chosen plan
+    #   redis:
+    #     version: "7" # Or desired version
+    # And then use its connection string (REDIS_URL) in your app's env vars.
+    # Assuming a managed Redis is created outside and linked via REDIS_URL.
+
+  # Web Service (Django with Gunicorn)
+  - type: web
+    name: web
+    env: python
+    region: oregon # Choose your preferred region
+    plan: standard # Choose your instance type/plan
+    buildCommand: |
+      pip install --upgrade pip
+      pip install -r requirements.txt
+      python manage.py collectstatic --noinput
+      python manage.py migrate
+    startCommand: gunicorn jobraker.wsgi:application --workers 4 --threads 4 --worker-tmp-dir /dev/shm
+    healthCheckPath: /health/ # Add a health check URL to your Django app
+    envVars:
+      - key: PORT # Render sets this automatically for web services
+        value: "8000" # Gunicorn will bind to this port
+      - fromGroup: AppSecrets # Example: if you create an Env Group for secrets
+      # Specific env vars can also be listed here if not in a group
+      - key: DATABASE_URL
+        fromService: # Example if Render creates a DB service named 'database'
+          type: pserv
+          name: database
+          property: connectionString
+      - key: REDIS_URL
+        fromService: # Example if Render creates a Redis service named 'redis'
+          type: pserv
+          name: redis
+          property: connectionString
+    autoDeploy: true # Optional: auto-deploy on push to the connected Git branch
+
+  # Celery Worker Service
+  - type: worker
+    name: celery-worker
+    env: python
+    region: oregon # Match web service region or choose based on needs
+    plan: standard # Choose based on expected workload
+    replicaCount: 1 # Start with 1, scale as needed
+    buildCommand: |
+      pip install --upgrade pip
+      pip install -r requirements.txt
+    startCommand: celery -A jobraker worker -l info -c 2 # -c for concurrency
+    envVars:
+      - fromGroup: AppSecrets # Example
+      - key: DATABASE_URL
+        fromService:
+          type: pserv
+          name: database
+          property: connectionString
+      - key: REDIS_URL
+        fromService:
+          type: pserv
+          name: redis
+          property: connectionString
+    autoDeploy: true
+
+  # Celery Beat Service (Scheduler)
+  - type: worker # Beat also runs as a worker type service
+    name: celery-beat
+    env: python
+    region: oregon
+    plan: standard # Usually doesn't need much resources
+    replicaCount: 1 # IMPORTANT: Celery Beat should only have 1 replica
+    buildCommand: |
+      pip install --upgrade pip
+      pip install -r requirements.txt
+    startCommand: celery -A jobraker beat -l info --scheduler django_celery_beat.schedulers:DatabaseScheduler
+    envVars:
+      - fromGroup: AppSecrets # Example
+      - key: DATABASE_URL
+        fromService:
+          type: pserv
+          name: database
+          property: connectionString
+      - key: REDIS_URL
+        fromService:
+          type: pserv
+          name: redis
+          property: connectionString
+    autoDeploy: true
+
+# Example of an Environment Group (optional, can be created in Render UI)
+# envVarGroups:
+#   - name: AppSecrets
+#     envVars:
+#       - key: DJANGO_SECRET_KEY
+#         generateValue: true # Or set your actual secret in the dashboard
+#       - key: OPENAI_API_KEY
+#         # value: your_openai_key_here (set in dashboard)
+#       # ... other secrets ...
+
+# Note on Managed Database/Redis:
+# The sections for 'database' and 'redis' type 'pserv' are illustrative if you were to define them
+# directly via blueprint using custom images.
+# For Render's fully managed PostgreSQL and Redis:
+# 1. Create these services first via the Render Dashboard.
+# 2. They will provide connection strings (e.g., DATABASE_URL, REDIS_URL).
+# 3. In your web, celery-worker, and celery-beat services (defined above),
+#    you would then set environment variables like:
+#    - key: DATABASE_URL
+#      value: <paste_your_render_db_connection_string_here> # (Or use `fromService` if linking to a DB defined in this blueprint)
+#    - key: REDIS_URL
+#      value: <paste_your_render_redis_connection_string_here> # (Or use `fromService`)
+# For this `render.yaml`, I've used `fromService` assuming you might define basic DB/Redis services
+# in the blueprint for Render to create, or that you name your dashboard-created services 'database' and 'redis'.
+# Adjust `fromService.name` or use direct values if your setup differs.
+# It's often simpler to create managed DB/Redis via dashboard and then reference their URLs.
+# If you do that, you can remove the 'database' and 'redis' pserv definitions from this YAML
+# and just ensure your app services get the correct DATABASE_URL and REDIS_URL.
+# I've kept them to show how they *could* be defined, but for Render's managed offerings,
+# linking via env vars set in the dashboard to dashboard-created services is common.
+# The `fromService` directive is powerful if all services are defined within the blueprint.
+# If `database` and `redis` services are created outside this blueprint (e.g. manually in UI),
+# you MUST remove the `fromService` blocks for DATABASE_URL and REDIS_URL in web/worker/beat
+# and instead set their `value` directly in the Render dashboard using the connection strings
+# provided by Render for those manually created database and Redis services.
+# For this generated file, I've assumed you *might* define DB/Redis in the blueprint.
+# If not, replace `fromService` blocks with direct `value` settings in the dashboard.
+
+# Final check: Ensure your Django app has a /health/ endpoint for health checks.
+# Example in your urls.py:
+# from django.http import HttpResponse
+# from django.urls import path
+# urlpatterns = [
+#     path('health/', lambda request: HttpResponse("OK")),
+#     # ... your other urls
+# ]

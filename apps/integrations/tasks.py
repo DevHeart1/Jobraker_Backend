@@ -3,6 +3,7 @@ Celery tasks for integration services.
 """
 
 from celery import shared_task
+from typing import Dict, Any, Optional, List # Added for type hints
 from django.utils import timezone
 from django.contrib.auth import get_user_model
 import logging
@@ -70,7 +71,7 @@ def generate_job_embeddings_and_ingest_for_rag(self, job_id: str):
     """
     try:
         from apps.jobs.models import Job
-        from apps.integrations.services.openai_service import EmbeddingService
+        from apps.integrations.services.openai import EmbeddingService # Consolidated
         from apps.common.services import VectorDBService
         
         job = Job.objects.get(id=job_id)
@@ -488,7 +489,7 @@ def update_job_source_sync_status(self, source_name, status='success', error_mes
 
 # --- Tasks for OpenAIJobAssistant ---
 @shared_task(bind=True, max_retries=2) # Shorter retries for potentially faster user-facing features
-def get_openai_job_advice_task(self, user_id: int, advice_type: str, context: str = "", user_profile_data: dict = None, query_for_rag: str = None):
+def get_openai_job_advice_task(self, user_id: int, advice_type: str, context: str = "", user_profile_data: dict = None, query_for_rag: str = None): # Ensure time is imported if used here
     """Celery task to get job advice from OpenAIJobAssistant."""
     # This task IS the implementation that was in OpenAIJobAssistant.get_job_advice
     try:
@@ -619,21 +620,28 @@ Be specific and tailor your advice to the user's profile and question."""
 
 
 @shared_task(bind=True, max_retries=2)
-def get_openai_chat_response_task(self, user_id: int, message: str, conversation_history: list = None, user_profile_data: dict = None):
-    """Celery task for OpenAIJobAssistant chat responses. Includes core logic."""
+def get_openai_chat_response_task(self, user_id: int, session_id: int, message: str, conversation_history: list = None, user_profile_data: dict = None): # Added session_id
+    """Celery task for OpenAIJobAssistant chat responses. Includes core logic and saves AI message."""
     try:
         from django.conf import settings
-        import openai
+        from openai import OpenAI as OpenAI_API # Renamed to avoid conflict if openai module is used directly
         import json # For function calling if used directly in task
+        from apps.chat.models import ChatSession, ChatMessage # Added for saving message
 
         api_key = getattr(settings, 'OPENAI_API_KEY', '')
+        if not api_key:
+            logger.warning(f"OpenAI API key not configured for task: get_openai_chat_response_task for user {user_id}, session {session_id}")
+            # Simulate a specific type of failure that the caller might expect (e.g., related to OpenAI setup)
+            return {'response': "OpenAI API key not configured.", 'model_used': 'config_error', 'success': False, 'error': 'api_key_missing'}
+
+        client = OpenAI_API(api_key=api_key) # Instantiate OpenAI client with API key
         model = getattr(settings, 'OPENAI_MODEL', 'gpt-4')
 
         # --- RAG Implementation ---
         rag_context_str = ""
         if message: # Use the user's message for RAG query
             try:
-                from apps.integrations.services.openai_service import EmbeddingService
+                from apps.integrations.services.openai import EmbeddingService # Consolidated
                 from apps.common.services import VectorDBService # Using actual service path
 
                 embedding_service = EmbeddingService()
@@ -710,57 +718,84 @@ def get_openai_chat_response_task(self, user_id: int, message: str, conversation
         # Moderation (simplified for task, ideally a utility function)
         OPENAI_MODERATION_CHECKS_TOTAL.labels(target='user_input').inc()
         mod_start_time = time.monotonic()
-        mod_response = openai.Moderation.create(input=message)
+        # Use client instance for moderation
+        mod_response = client.moderations.create(input=message)
         OPENAI_API_CALL_DURATION_SECONDS.labels(type='moderation', model='text-moderation-latest').observe(time.monotonic() - mod_start_time)
         OPENAI_API_CALLS_TOTAL.labels(type='moderation', model='text-moderation-latest', status='success').inc() # Assuming mod call itself succeeds
 
         if mod_response.results[0].flagged:
             OPENAI_MODERATION_FLAGGED_TOTAL.labels(target='user_input').inc()
-            logger.warning(f"User message flagged in task: get_openai_chat_response_task for user {user_id}")
+            logger.warning(f"User message flagged in task: get_openai_chat_response_task for user {user_id}, session {session_id}") # Added session_id to log
             return {'response': "Input violates guidelines.", 'model_used': 'moderation_filter', 'success': False, 'error': 'flagged_input'}
 
-        openai.api_key = api_key
+        # No need to set openai.api_key globally if client instance is used
 
         start_time = time.monotonic()
-        status = 'error'
+        api_call_status = 'error' # Renamed to avoid conflict with task status for metrics
+        ai_response_text = "" # Initialize
         try:
             # Simplified: Not including function calling logic directly in task for this refactor stage to keep it focused.
-            response = openai.ChatCompletion.create(
+            # Use client instance for chat completion
+            response = client.chat.completions.create(
                 model=model,
                 messages=messages_payload,
                 max_tokens=800,
                 temperature=0.7
             )
-            ai_response = response.choices[0].message.content.strip()
-            status = 'success'
+            ai_response_text = response.choices[0].message.content.strip()
+            api_call_status = 'success'
         except Exception as e:
             logger.error(f"OpenAI API call failed in get_openai_chat_response_task: {e}")
+            # OPENAI_API_CALLS_TOTAL is updated in finally block
             raise # Re-raise to trigger Celery retry
         finally:
             duration = time.monotonic() - start_time
             OPENAI_API_CALL_DURATION_SECONDS.labels(type='chat', model=model).observe(duration)
-            OPENAI_API_CALLS_TOTAL.labels(type='chat', model=model, status=status).inc()
+            OPENAI_API_CALLS_TOTAL.labels(type='chat', model=model, status=api_call_status).inc()
 
 
         # Moderation of AI output (simplified)
         OPENAI_MODERATION_CHECKS_TOTAL.labels(target='ai_output').inc()
         mod_ai_start_time = time.monotonic()
-        mod_response_ai = openai.Moderation.create(input=ai_response)
+        # Use client instance for moderation
+        mod_response_ai = client.moderations.create(input=ai_response_text)
         OPENAI_API_CALL_DURATION_SECONDS.labels(type='moderation', model='text-moderation-latest').observe(time.monotonic() - mod_ai_start_time)
         OPENAI_API_CALLS_TOTAL.labels(type='moderation', model='text-moderation-latest', status='success').inc()
 
         if mod_response_ai.results[0].flagged:
             OPENAI_MODERATION_FLAGGED_TOTAL.labels(target='ai_output').inc()
-            logger.warning(f"AI response flagged in task: get_openai_chat_response_task for user {user_id}")
-            return {'response': "Output violates guidelines.", 'model_used': 'moderation_filter', 'success': False, 'error': 'flagged_output'}
+            logger.warning(f"AI response flagged in task: get_openai_chat_response_task for user {user_id}, session {session_id}")
+            # Even if flagged, we might want to save a placeholder or the flagged message with a note.
+            # For now, let's follow the pattern of returning an error status.
+            # The actual saving of a "flagged response" message is not done here yet.
+        # If AI output is flagged, we don't save it as a regular message.
+            return {'response': "AI output violates content guidelines and was not saved.", 'model_used': 'moderation_filter', 'success': False, 'error': 'flagged_ai_output_not_saved'}
+
+        # Save the AI message to the chat session (only if not flagged)
+        try:
+            chat_session = ChatSession.objects.get(id=session_id)
+            ChatMessage.objects.create(
+                session=chat_session,
+                sender='ai',
+                message_text=ai_response_text # Use the variable that holds the text
+            )
+            chat_session.save(update_fields=['updated_at'])
+            logger.info(f"Successfully saved AI response for session {session_id}")
+        except ChatSession.DoesNotExist:
+            logger.error(f"ChatSession with id {session_id} not found. Cannot save AI message.")
+            return {'response': ai_response_text, 'model_used': model, 'success': True, 'error': 'session_not_found_for_saving_message', 'message_saved': False}
+        except Exception as e_save:
+            logger.error(f"Failed to save AI message for session {session_id}: {e_save}")
+            return {'response': ai_response_text, 'model_used': model, 'success': True, 'error': f'message_save_failed: {str(e_save)}', 'message_saved': False}
 
         return {
-            'response': ai_response,
+            'response': ai_response_text,
             'model_used': model,
-            'success': True
+            'success': True,
+            'message_saved': True
         }
     except Exception as exc: # Outer try-except for Celery retry logic
-        logger.error(f"Error in get_openai_chat_response_task for user {user_id}: {exc}")
+        logger.error(f"Error in get_openai_chat_response_task for user {user_id}, session {session_id}: {exc}")
         raise self.retry(exc=exc, countdown=30 * (2 ** self.request.retries))
 
 
@@ -778,7 +813,7 @@ def analyze_openai_resume_task(self, resume_text: str, target_job: str = "", use
         rag_context_str = ""
         if target_job: # Only fetch RAG context if a target job is specified
             try:
-                from apps.integrations.services.openai_service import EmbeddingService
+                from apps.integrations.services.openai import EmbeddingService # Consolidated
                 from apps.common.services import VectorDBService
 
                 embedding_service = EmbeddingService()
@@ -1149,7 +1184,7 @@ def process_knowledge_article_for_rag_task(self, article_id: int):
     """
     try:
         from apps.common.models import KnowledgeArticle
-        from apps.integrations.services.openai_service import EmbeddingService
+        from apps.integrations.services.openai import EmbeddingService # Consolidated
         from apps.common.services import VectorDBService
 
         article = KnowledgeArticle.objects.get(id=article_id)
@@ -1218,3 +1253,85 @@ def process_knowledge_article_for_rag_task(self, article_id: int):
     except Exception as exc:
         logger.error(f"Error processing KnowledgeArticle {article_id} for RAG: {exc}")
         raise self.retry(exc=exc, countdown=60 * (2 ** self.request.retries))
+
+
+@shared_task(bind=True, max_retries=3)
+def generate_interview_questions_task(self, job_id: str, user_id: Optional[str] = None):
+    """
+    Generates interview questions for a specific job using OpenAI.
+    Optionally considers user profile for personalization if user_id is provided.
+    """
+    from apps.jobs.models import Job
+    from apps.accounts.models import UserProfile # For fetching user profile summary
+    from apps.integrations.services.openai import OpenAIClient
+
+    logger.info(f"Starting interview question generation for Job ID: {job_id}, User ID: {user_id}")
+
+    try:
+        job = Job.objects.get(id=job_id)
+    except Job.DoesNotExist:
+        logger.error(f"Job with ID {job_id} not found for interview question generation.")
+        return {"status": "error", "error": "Job not found", "job_id": job_id}
+
+    user_profile_summary = None
+    if user_id:
+        try:
+            user_profile = UserProfile.objects.get(user_id=user_id)
+            # Create a concise summary from the profile. Adjust fields as needed.
+            summary_parts = []
+            if user_profile.current_title:
+                summary_parts.append(f"Current Title: {user_profile.current_title}")
+            if user_profile.experience_level:
+                summary_parts.append(f"Experience Level: {user_profile.get_experience_level_display()}") # Use display value
+            if user_profile.skills:
+                summary_parts.append(f"Key Skills: {', '.join(user_profile.skills[:5])}") # Top 5 skills
+            if user_profile.bio:
+                summary_parts.append(f"Bio Snippet: {user_profile.bio[:200]}...") # Short bio snippet
+
+            if summary_parts:
+                user_profile_summary = ". ".join(summary_parts)
+            logger.info(f"User profile summary for personalization: {user_profile_summary}")
+
+        except UserProfile.DoesNotExist:
+            logger.warning(f"UserProfile not found for User ID: {user_id}. Proceeding without personalization.")
+        except Exception as e:
+            logger.error(f"Error fetching or summarizing UserProfile for User ID {user_id}: {e}")
+            # Proceed without personalization if profile fetching fails
+
+    client = OpenAIClient()
+    model_name_client = client.model # For metrics, assuming client has 'model' attribute for chat model
+
+    api_call_status = 'error'
+    questions = []
+    start_time = time.monotonic() # For duration metric
+
+    try:
+        questions = client.generate_interview_questions(
+            job_title=job.title,
+            job_description=job.description,
+            # num_questions=10, # Default in client method
+            # question_types=["technical", "behavioral", "situational"], # Example, or let client default
+            user_profile_summary=user_profile_summary
+        )
+        api_call_status = 'success' if questions else 'no_questions_generated'
+
+        # Log result for now. The task result will be stored by Celery if a backend is configured.
+        logger.info(f"Generated {len(questions)} interview questions for Job ID: {job_id}. API status: {api_call_status}")
+
+        # The return value of the task is what gets stored in the result backend.
+        return {
+            "job_id": str(job.id),
+            "job_title": job.title,
+            "questions": questions,
+            "status": api_call_status # To indicate if questions were successfully generated by OpenAI
+        }
+
+    except Exception as e:
+        logger.error(f"OpenAIClient call failed in generate_interview_questions_task for Job {job_id}: {e}", exc_info=True)
+        # Re-raise to allow Celery to retry if max_retries not reached
+        # OPENAI_API_CALLS_TOTAL metric will be updated by the finally block if it's outside this try
+        raise self.retry(exc=e, countdown=60 * (2 ** self.request.retries))
+    finally:
+        duration = time.monotonic() - start_time
+        OPENAI_API_CALL_DURATION_SECONDS.labels(type='interview_question_generation', model=model_name_client or 'unknown').observe(duration)
+        OPENAI_API_CALLS_TOTAL.labels(type='interview_question_generation', model=model_name_client or 'unknown', status=api_call_status).inc()

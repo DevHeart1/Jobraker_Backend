@@ -38,10 +38,11 @@ drf-spectacular[sidecar]>=0.26.0
 requests>=2.31.0
 openai>=1.0.0
 httpx>=0.24.0
+pinecone-client>=3.0.0 # Added for VectorDBService
 
-# Environment & Configuration
-python-decouple>=3.8
-python-dotenv>=1.0.0
+# Search (Elasticsearch)
+django-elasticsearch-dsl>=7.2,<8.0 # For ES 7.x compatibility, adjust if using ES 8.x
+elasticsearch>=7.0,<8.0 # Base client, ensure compatibility with ES version
 
 # Monitoring & Logging
 sentry-sdk[django]>=1.28.0

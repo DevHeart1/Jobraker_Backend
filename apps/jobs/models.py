@@ -6,6 +6,7 @@ from django.db import models
 from django.contrib.auth import get_user_model
 from django.core.validators import MinValueValidator, MaxValueValidator
 from django.utils import timezone
+from django.utils.translation import gettext_lazy as _ # Added for choices
 from pgvector.django import VectorField
 import uuid
 
@@ -219,8 +220,57 @@ class Application(models.Model):
     submission_logs = models.JSONField(default=list, help_text="Application submission logs (can include Skyvern logs or manual entries).")
     
     # Notes and Feedback
-    notes = models.TextField(blank=True)
+    notes = models.TextField(blank=True, help_text="System or general notes about the application.") # Existing notes field
+    user_notes = models.TextField(blank=True, help_text="User's private notes for this application.") # New field for user-specific notes
     feedback_received = models.TextField(blank=True)
+
+    # User-defined status for personal tracking
+    USER_DEFINED_STATUS_CHOICES = [
+        ('interested', 'Interested/Saved'),
+        ('preparing_application', 'Preparing Application'),
+        ('applied', 'Applied'),
+        ('assessment_phase', 'Assessment/Test Phase'),
+        ('initial_interview', 'Initial Interview'),
+        ('technical_interview', 'Technical Interview'),
+        ('final_interview', 'Final Interview/On-site'),
+        ('offer_pending', 'Offer Pending Decision'),
+        ('offer_received_custom', 'Offer Received (User Tracked)'), # To distinguish from system 'offer_received'
+        ('negotiating', 'Negotiating Offer'),
+        ('accepted_custom', 'Offer Accepted (User Tracked)'),
+        ('rejected_by_me', 'Declined by Me'),
+        ('rejected_by_company', 'Rejected by Company (User Tracked)'),
+        ('archived', 'Archived/Not Pursuing'),
+        ('other', 'Other'),
+    ]
+    user_defined_status = models.CharField(
+        max_length=30,
+        choices=USER_DEFINED_STATUS_CHOICES,
+        blank=True,
+        null=True,
+        help_text="User's custom status for tracking application progress."
+    )
+
+    # Detailed Interview and Offer Information
+    interview_details = models.JSONField(
+        default=list, # Could be a list of interview objects: [{"date": "...", "type": "...", "notes": "..."}]
+        blank=True,
+        null=True,
+        help_text="Structured details about interviews (e.g., date, type, interviewer, notes)."
+    )
+    offer_details = models.JSONField(
+        default=dict, # Could be an object: {"salary": ..., "start_date": ..., "bonus": ...}
+        blank=True,
+        null=True,
+        help_text="Structured details about any job offer received."
+    )
+
+    # Reminder Tracking
+    # follow_up_date is already defined: models.DateTimeField(null=True, blank=True)
+    follow_up_reminder_sent_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text="Timestamp of the last follow-up reminder sent for the 'follow_up_date'."
+    )
     
     # Timestamps
     applied_at = models.DateTimeField(null=True, blank=True)
@@ -286,25 +336,25 @@ class JobAlert(models.Model):
     user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='job_alerts')
     
     # Alert Configuration
-    name = models.CharField(max_length=100, help_text="User-defined name for this job alert.")
-    keywords = models.JSONField(default=list, help_text="List of keywords or phrases to match in job titles or descriptions.")
-    location = models.CharField(max_length=100, blank=True, help_text="Desired job location (e.g., city, state, 'remote').")
-    job_type = models.CharField(max_length=20, choices=Job.JOB_TYPES, blank=True, help_text="Preferred employment type.")
-    experience_level = models.CharField(max_length=20, choices=Job.EXPERIENCE_LEVELS, blank=True, help_text="Preferred experience level.")
-    remote_only = models.BooleanField(default=False, help_text="If true, only include remote jobs.")
+    name = models.CharField(max_length=100, help_text="Alert name for user reference")
+    keywords = models.JSONField(default=list, help_text="Keywords to search for")
+    location = models.CharField(max_length=100, blank=True)
+    job_type = models.CharField(max_length=20, choices=Job.JOB_TYPES, blank=True)
+    experience_level = models.CharField(max_length=20, choices=Job.EXPERIENCE_LEVELS, blank=True)
+    remote_only = models.BooleanField(default=False)
     
     # Salary preferences
-    min_salary = models.PositiveIntegerField(null=True, blank=True, help_text="Minimum desired salary (annualized).")
-    max_salary = models.PositiveIntegerField(null=True, blank=True, help_text="Maximum desired salary (annualized).")
+    min_salary = models.PositiveIntegerField(null=True, blank=True)
+    max_salary = models.PositiveIntegerField(null=True, blank=True)
     
     # Notification settings
-    frequency = models.CharField(max_length=20, choices=FREQUENCY_CHOICES, default='daily', help_text="How often to send alert notifications.")
-    email_notifications = models.BooleanField(default=True, help_text="Enable email notifications for this alert.")
-    push_notifications = models.BooleanField(default=False, help_text="Enable push notifications for this alert (if supported).")
+    frequency = models.CharField(max_length=20, choices=FREQUENCY_CHOICES, default='daily')
+    email_notifications = models.BooleanField(default=True)
+    push_notifications = models.BooleanField(default=False)
     
     # Status
-    is_active = models.BooleanField(default=True, help_text="Is this alert currently active and running?")
-    last_run = models.DateTimeField(null=True, blank=True, help_text="Timestamp of the last time this alert was processed.")
+    is_active = models.BooleanField(default=True)
+    last_run = models.DateTimeField(null=True, blank=True)
     
     # Tracking
     created_at = models.DateTimeField(auto_now_add=True)
