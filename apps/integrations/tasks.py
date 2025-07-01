@@ -3,13 +3,46 @@ Celery tasks for integration services.
 """
 
 from celery import shared_task
-from typing import Dict, Any, Optional, List # Added for type hints
+from typing import Dict, Any, Optional, List
 from django.utils import timezone
 from django.contrib.auth import get_user_model
 import logging
+import time
+from prometheus_client import Counter, Histogram
 
 logger = logging.getLogger(__name__)
 User = get_user_model()
+
+# Prometheus metrics
+OPENAI_API_CALLS_TOTAL = Counter(
+    'jobraker_openai_api_calls_total',
+    'Total calls made to OpenAI API.',
+    ['type', 'model', 'status']
+)
+
+OPENAI_API_CALL_DURATION_SECONDS = Histogram(
+    'jobraker_openai_api_call_duration_seconds',
+    'Latency of OpenAI API calls.',
+    ['type', 'model']
+)
+
+OPENAI_MODERATION_CHECKS_TOTAL = Counter(
+    'jobraker_openai_moderation_checks_total',
+    'Total moderation checks performed.',
+    ['target']
+)
+
+OPENAI_MODERATION_FLAGGED_TOTAL = Counter(
+    'jobraker_openai_moderation_flagged_total',
+    'Total times content was flagged by moderation.',
+    ['target']
+)
+
+SKYVERN_APPLICATION_SUBMISSIONS_TOTAL = Counter(
+    'jobraker_skyvern_application_submissions_total',
+    'Total job applications submitted via Skyvern.',
+    ['status']
+)
 
 
 @shared_task(bind=True, max_retries=3)
@@ -71,15 +104,15 @@ def generate_job_embeddings_and_ingest_for_rag(self, job_id: str):
     """
     try:
         from apps.jobs.models import Job
-        from apps.integrations.services.openai import EmbeddingService # Consolidated
+        from apps.integrations.services.openai import EmbeddingService
         from apps.common.services import VectorDBService
         
         job = Job.objects.get(id=job_id)
         embedding_service = EmbeddingService()
         vector_db_service = VectorDBService()
-        model_name = embedding_service.embedding_model # Get model name for labels
+        model_name = embedding_service.embedding_model
 
-        # --- 1. Generate and Save Embeddings to Job Model ---
+        # Generate and Save Embeddings to Job Model
         job_model_embedding_status = 'error'
         job_embeddings_dict = None
         try:
@@ -88,7 +121,6 @@ def generate_job_embeddings_and_ingest_for_rag(self, job_id: str):
             job_model_embedding_status = 'success' if job_embeddings_dict else 'no_embeddings_generated'
         except Exception as e:
             logger.error(f"EmbeddingService call failed in generate_job_embeddings_and_ingest_for_rag for job {job_id}: {e}")
-            # Decide if to retry or just log and fail this part. For now, let it propagate to task retry.
             raise
         finally:
             emb_duration = time.monotonic() - emb_start_time
@@ -97,73 +129,77 @@ def generate_job_embeddings_and_ingest_for_rag(self, job_id: str):
 
         rag_ingested_successfully = False
         if job_embeddings_dict and 'combined_embedding' in job_embeddings_dict:
-            if 'title_embedding' in job_embeddings_dict: # Save title embedding if present
+            if 'title_embedding' in job_embeddings_dict:
                 job.title_embedding = job_embeddings_dict['title_embedding']
-            job.combined_embedding = job_embeddings_dict['combined_embedding'] # This is used for RAG
+            job.combined_embedding = job_embeddings_dict['combined_embedding']
             
             try:
                 job.save(update_fields=['title_embedding', 'combined_embedding'])
                 logger.info(f"Saved embeddings to Job model for job_id: {job_id}")
             except Exception as e:
                 logger.error(f"Failed to save embeddings to Job model {job_id}: {e}")
-                # Continue to RAG ingestion if combined_embedding is available, but log this error.
 
-            # --- 2. Ingest Job Content into RAG Vector Store ---
-            # Prepare text content for RAG
+            # Ingest Job Content into RAG Vector Store
             rag_text_content = (
                 f"Job Title: {job.title or 'N/A'}\n"
                 f"Company: {job.company or 'N/A'}\n"
                 f"Location: {job.location or 'N/A'}\n"
-                f"Type: {job.get_job_type_display() or 'N/A'}\n" # Use display value for job_type
+                f"Type: {job.get_job_type_display() or 'N/A'}\n"
                 f"Description: {job.description or 'N/A'}"
             )
-            # Add salary if available and makes sense for RAG search context
+            
             if job.salary_min and job.salary_max:
                 rag_text_content += f"\nSalary Range: ${job.salary_min} - ${job.salary_max}"
             elif job.salary_min:
                 rag_text_content += f"\nSalary Min: ${job.salary_min}"
 
-
             metadata_for_rag = {
-                'job_id_original': str(job.id), # Keep original job ID for reference
+                'job_id_original': str(job.id),
                 'company': job.company,
                 'location': job.location,
                 'posted_date': str(job.posted_date.isoformat() if job.posted_date else None),
-                'job_type': job.job_type, # Store the key, not display value, for potential filtering
-                'title': job.title, # Useful for display with RAG results
-                # Add any other filterable/useful metadata, e.g., from job.tags if it exists
+                'job_type': job.job_type,
+                'title': job.title,
             }
 
-            # Delete existing RAG document for this job_id to ensure freshness
-            # This uses source_id which is str(job.id) for 'job_listing' type
+            # Delete existing RAG document for this job_id
             vector_db_service.delete_documents(source_type='job_listing', source_id=str(job.id))
 
             add_status = vector_db_service.add_documents(
                 texts=[rag_text_content],
-                embeddings=[job_embeddings_dict['combined_embedding']], # Use the combined embedding
+                embeddings=[job_embeddings_dict['combined_embedding']],
                 source_types=['job_listing'],
                 source_ids=[str(job.id)],
                 metadatas=[metadata_for_rag]
             )
+            
             if add_status:
                 rag_ingested_successfully = True
                 logger.info(f"Successfully added/updated job {job.id} in RAG vector store.")
             else:
                 logger.error(f"Failed to add/update job {job.id} in RAG vector store.")
 
-            return {'status': 'success', 'job_id': str(job_id), 'embeddings_saved_to_job': True, 'rag_ingested': rag_ingested_successfully}
+            return {
+                'status': 'success', 
+                'job_id': str(job_id), 
+                'embeddings_saved_to_job': True, 
+                'rag_ingested': rag_ingested_successfully
+            }
 
-        else: # No embeddings generated
+        else:
             logger.warning(f"No embeddings generated for job: {job.title}, RAG ingestion skipped.")
-            return {'status': 'no_embeddings', 'job_id': str(job_id), 'embeddings_saved_to_job': False, 'rag_ingested': False}
+            return {
+                'status': 'no_embeddings', 
+                'job_id': str(job_id), 
+                'embeddings_saved_to_job': False, 
+                'rag_ingested': False
+            }
             
     except Job.DoesNotExist:
         logger.error(f"Job not found: {job_id}")
-        # OPENAI_API_CALLS_TOTAL.labels(type='embedding_job', model='N/A', status='prereq_not_found').inc() # Covered by job_model_embedding_status if needed
         return {'status': 'job_not_found', 'job_id': str(job_id)}
     except Exception as exc:
         logger.error(f"Error in generate_job_embeddings_and_ingest_for_rag for job {job_id}: {exc}")
-        # OPENAI_API_CALLS_TOTAL.labels(type='embedding_job', model='N/A', status='task_error').inc() # Covered by job_model_embedding_status
         raise self.retry(exc=exc, countdown=60 * (2 ** self.request.retries))
 
 
@@ -189,19 +225,17 @@ def generate_user_profile_embeddings(self, user_id):
         start_time = time.monotonic()
         status = 'error'
         try:
-            # Generate embeddings
             embeddings = embedding_service.generate_user_profile_embeddings(user.profile)
             status = 'success' if embeddings else 'no_embeddings_generated'
         except Exception as e:
             logger.error(f"EmbeddingService call failed in generate_user_profile_embeddings for user {user_id}: {e}")
-            raise # Re-raise to trigger Celery retry
+            raise
         finally:
             duration = time.monotonic() - start_time
             OPENAI_API_CALL_DURATION_SECONDS.labels(type='embedding_profile', model=model_name).observe(duration)
             OPENAI_API_CALLS_TOTAL.labels(type='embedding_profile', model=model_name, status=status).inc()
 
         if embeddings:
-            # Update profile with embeddings
             if 'profile_embedding' in embeddings:
                 user.profile.profile_embedding = embeddings['profile_embedding']
             if 'skills_embedding' in embeddings:
@@ -303,7 +337,7 @@ def analyze_job_match_for_user(self, user_id, job_id):
             return {'status': 'no_profile', 'user_id': str(user_id)}
         
         client = OpenAIClient()
-        model_name = client.model # Get model name for labels
+        model_name = client.model
         
         # Prepare user profile text
         profile = user.profile
@@ -328,7 +362,7 @@ def analyze_job_match_for_user(self, user_id, job_id):
             api_status = 'success' if analysis else 'no_analysis_generated'
         except Exception as e:
             logger.error(f"OpenAIClient call failed in analyze_job_match_for_user for user {user_id}, job {job_id}: {e}")
-            raise # Re-raise for Celery retry
+            raise
         finally:
             duration = time.monotonic() - start_time
             OPENAI_API_CALL_DURATION_SECONDS.labels(type='job_match_analysis', model=model_name).observe(duration)
@@ -337,12 +371,12 @@ def analyze_job_match_for_user(self, user_id, job_id):
         if analysis:
             logger.info(f"Generated job match analysis for user {user_id} and job {job_id}")
             return {
-                'status': 'success', # Task overall status
+                'status': 'success',
                 'user_id': str(user_id),
                 'job_id': str(job_id),
                 'analysis': analysis,
             }
-        else: # If no analysis content but no exception
+        else:
             logger.warning(f"No analysis content from OpenAIClient for user {user_id}, job {job_id}")
             return {'status': 'no_analysis_content', 'user_id': str(user_id), 'job_id': str(job_id)}
         
@@ -350,7 +384,7 @@ def analyze_job_match_for_user(self, user_id, job_id):
         logger.error(f"User or job not found: {e}")
         OPENAI_API_CALLS_TOTAL.labels(type='job_match_analysis', model='N/A', status='prereq_not_found').inc()
         return {'status': 'not_found', 'error': str(e)}
-    except Exception as exc: # Outer try-except for Celery retry logic
+    except Exception as exc:
         logger.error(f"Error analyzing job match: {exc}")
         return {'status': 'error', 'error': str(exc)}
 
@@ -386,7 +420,7 @@ def generate_cover_letter_for_application(self, user_id, job_id):
         
         # Get cover letter template if available
         template = profile.cover_letter_template if profile.cover_letter_template else None
-        model_name = client.model # Get model name for labels
+        model_name = client.model
 
         start_time = time.monotonic()
         api_status = 'error'
@@ -404,7 +438,7 @@ def generate_cover_letter_for_application(self, user_id, job_id):
             api_status = 'success' if cover_letter else 'no_letter_generated'
         except Exception as e:
             logger.error(f"OpenAIClient call failed in generate_cover_letter_for_application for user {user_id}, job {job_id}: {e}")
-            raise # Re-raise for Celery retry
+            raise
         finally:
             duration = time.monotonic() - start_time
             OPENAI_API_CALL_DURATION_SECONDS.labels(type='cover_letter_generation', model=model_name).observe(duration)
@@ -413,12 +447,12 @@ def generate_cover_letter_for_application(self, user_id, job_id):
         if cover_letter:
             logger.info(f"Generated cover letter for user {user_id} and job {job_id}")
             return {
-                'status': 'success', # Task overall status
+                'status': 'success',
                 'user_id': str(user_id),
                 'job_id': str(job_id),
                 'cover_letter': cover_letter,
             }
-        else: # If no cover letter content but no exception
+        else:
             logger.warning(f"No cover letter content from OpenAIClient for user {user_id}, job {job_id}")
             return {'status': 'no_letter_content', 'user_id': str(user_id), 'job_id': str(job_id)}
         
@@ -426,7 +460,7 @@ def generate_cover_letter_for_application(self, user_id, job_id):
         logger.error(f"User or job not found: {e}")
         OPENAI_API_CALLS_TOTAL.labels(type='cover_letter_generation', model='N/A', status='prereq_not_found').inc()
         return {'status': 'not_found', 'error': str(e)}
-    except Exception as exc: # Outer try-except for Celery retry logic
+    except Exception as exc:
         logger.error(f"Error generating cover letter: {exc}")
         return {'status': 'error', 'error': str(exc)}
 
@@ -487,40 +521,26 @@ def update_job_source_sync_status(self, source_name, status='success', error_mes
         return {'status': 'error', 'error': str(exc)}
 
 
-# --- Tasks for OpenAIJobAssistant ---
-@shared_task(bind=True, max_retries=2) # Shorter retries for potentially faster user-facing features
-def get_openai_job_advice_task(self, user_id: int, advice_type: str, context: str = "", user_profile_data: dict = None, query_for_rag: str = None): # Ensure time is imported if used here
-    """Celery task to get job advice from OpenAIJobAssistant."""
-    # This task IS the implementation that was in OpenAIJobAssistant.get_job_advice
+@shared_task(bind=True, max_retries=2)
+def get_openai_job_advice_task(self, user_id: int, advice_type: str, context: str = "", user_profile_data: dict = None, query_for_rag: str = None):
+    """Celery task to get job advice from OpenAI with RAG support."""
     try:
-        # Imports for the actual logic
         from django.conf import settings
-        import openai # Ensure openai is imported here if not at top level of tasks.py
-        # We need the helper methods from OpenAIJobAssistant or replicate them here.
-        # For simplicity, instantiating a slimmed down assistant or directly using its helpers if static.
-        # Assuming _build_advice_prompt and _get_mock_advice are part of the assistant
-        # and OPENAI_API_KEY, OPENAI_MODEL are accessible via settings.
-
+        import openai
+        
         api_key = getattr(settings, 'OPENAI_API_KEY', '')
-        model = getattr(settings, 'OPENAI_MODEL', 'gpt-4')
+        model = getattr(settings, 'OPENAI_MODEL', 'gpt-4o-mini')
 
-        # Replicating _build_advice_prompt logic or making it accessible
-        # This is a simplified version. Ideally, _build_advice_prompt would be a static method or utility.
-        # For now, let's assume we can call a helper or reconstruct.
-        # To avoid circular dependencies if _build_advice_prompt uses other instance methods,
-        # it's better to have it as a static/utility or replicate its core logic.
-        # For this step, we'll mock the prompt building to focus on the async structure.
-
-        # --- RAG Implementation ---
+        # RAG Implementation
         rag_context_str = ""
         text_for_rag_embedding = query_for_rag if query_for_rag else context
         if text_for_rag_embedding:
             try:
-                from apps.integrations.services.openai_service import EmbeddingService
-                from apps.common.services import VectorDBService # Using actual service path
+                from apps.integrations.services.openai import EmbeddingService
+                from apps.common.services import VectorDBService
 
                 embedding_service = EmbeddingService()
-                vdb_service = VectorDBService() # Service with implemented ORM logic
+                vdb_service = VectorDBService()
 
                 query_embedding_list = embedding_service.generate_embeddings([text_for_rag_embedding])
                 if query_embedding_list and query_embedding_list[0]:
@@ -528,9 +548,9 @@ def get_openai_job_advice_task(self, user_id: int, advice_type: str, context: st
 
                     rag_filter = None
                     if advice_type == "salary":
-                        rag_filter = {'source_type__in': ['job_listing', 'salary_data_article']} # Example source types
+                        rag_filter = {'source_type__in': ['job_listing', 'salary_data_article']}
                     elif advice_type in ["resume", "interview", "application", "skills", "networking"]:
-                        rag_filter = {'source_type__in': ['career_article', 'faq_item']} # Example source types
+                        rag_filter = {'source_type__in': ['career_article', 'faq_item']}
 
                     logger.info(f"RAG: Searching documents for advice_type '{advice_type}' with filter: {rag_filter}")
                     similar_docs = vdb_service.search_similar_documents(
@@ -545,8 +565,8 @@ def get_openai_job_advice_task(self, user_id: int, advice_type: str, context: st
                             doc_info = (
                                 f"Retrieved Document {i+1} "
                                 f"(Source Type: {doc.get('source_type', 'N/A')}, "
-                                f"Source ID: {doc.get('source_id', 'N/A')}, " # Useful for debugging/tracing
-                                f"Similarity: {doc.get('similarity_score', 0.0):.3f}):" # Display score
+                                f"Source ID: {doc.get('source_id', 'N/A')}, "
+                                f"Similarity: {doc.get('similarity_score', 0.0):.3f}):"
                             )
                             rag_context_parts.append(f"{doc_info}\n{doc.get('text_content', '')}")
                         rag_context_parts.append("--- End of Retrieved Information ---")
@@ -558,9 +578,8 @@ def get_openai_job_advice_task(self, user_id: int, advice_type: str, context: st
                     logger.warning("RAG: Could not generate query embedding for advice task.")
             except Exception as e:
                 logger.error(f"RAG pipeline error in get_openai_job_advice_task: {e}")
-        # --- End RAG Implementation ---
 
-        # Refined prompt building
+        # Build prompt
         user_profile_summary = "Not specified."
         if user_profile_data:
             user_profile_summary = f"Experience: {user_profile_data.get('experience_level', 'N/A')}, Skills: {', '.join(user_profile_data.get('skills', []))}."
@@ -588,7 +607,7 @@ Be specific and tailor your advice to the user's profile and question."""
         start_time = time.monotonic()
         status = 'error'
         try:
-            response = openai.ChatCompletion.create(
+            response = openai.chat.completions.create(
                 model=model,
                 messages=[
                     {"role": "system", "content": system_message_content},
@@ -607,52 +626,48 @@ Be specific and tailor your advice to the user's profile and question."""
             }
         except Exception as e:
             logger.error(f"OpenAI API call failed in get_openai_job_advice_task: {e}")
-            # This return is for the task caller, actual exception is raised for Celery retry
-            raise # Re-raise to trigger Celery retry
+            raise
         finally:
             duration = time.monotonic() - start_time
             OPENAI_API_CALL_DURATION_SECONDS.labels(type='advice', model=model).observe(duration)
             OPENAI_API_CALLS_TOTAL.labels(type='advice', model=model, status=status).inc()
 
-    except Exception as exc: # Outer try-except for Celery retry logic
+    except Exception as exc:
         logger.error(f"Error in get_openai_job_advice_task for user {user_id}: {exc}")
         raise self.retry(exc=exc, countdown=30 * (2 ** self.request.retries))
 
 
 @shared_task(bind=True, max_retries=2)
-def get_openai_chat_response_task(self, user_id: int, session_id: int, message: str, conversation_history: list = None, user_profile_data: dict = None): # Added session_id
+def get_openai_chat_response_task(self, user_id: int, session_id: int, message: str, conversation_history: list = None, user_profile_data: dict = None):
     """Celery task for OpenAIJobAssistant chat responses. Includes core logic and saves AI message."""
     try:
         from django.conf import settings
-        from openai import OpenAI as OpenAI_API # Renamed to avoid conflict if openai module is used directly
-        import json # For function calling if used directly in task
-        from apps.chat.models import ChatSession, ChatMessage # Added for saving message
+        from openai import OpenAI as OpenAI_API
+        import json
+        from apps.chat.models import ChatSession, ChatMessage
 
         api_key = getattr(settings, 'OPENAI_API_KEY', '')
         if not api_key:
             logger.warning(f"OpenAI API key not configured for task: get_openai_chat_response_task for user {user_id}, session {session_id}")
-            # Simulate a specific type of failure that the caller might expect (e.g., related to OpenAI setup)
             return {'response': "OpenAI API key not configured.", 'model_used': 'config_error', 'success': False, 'error': 'api_key_missing'}
 
-        client = OpenAI_API(api_key=api_key) # Instantiate OpenAI client with API key
+        client = OpenAI_API(api_key=api_key)
         model = getattr(settings, 'OPENAI_MODEL', 'gpt-4')
 
-        # --- RAG Implementation ---
+        # RAG Implementation
         rag_context_str = ""
-        if message: # Use the user's message for RAG query
+        if message:
             try:
-                from apps.integrations.services.openai import EmbeddingService # Consolidated
-                from apps.common.services import VectorDBService # Using actual service path
+                from apps.integrations.services.openai import EmbeddingService
+                from apps.common.services import VectorDBService
 
                 embedding_service = EmbeddingService()
-                vdb_service = VectorDBService() # Service with implemented ORM logic
+                vdb_service = VectorDBService()
 
                 query_embedding_list = embedding_service.generate_embeddings([message])
                 if query_embedding_list and query_embedding_list[0]:
                     query_embedding = query_embedding_list[0]
 
-                    # For chat, a generic search might be okay, or we can add simple keyword-based filters.
-                    # Example: if user asks about "jobs" or "roles", prioritize 'job_listing' source_type.
                     rag_filter = None
                     if "job" in message.lower() or "role" in message.lower() or "position" in message.lower():
                         rag_filter = {'source_type': 'job_listing'}
@@ -685,7 +700,6 @@ def get_openai_chat_response_task(self, user_id: int, session_id: int, message: 
                     logger.warning("RAG: Could not generate query embedding for chat task.")
             except Exception as e:
                 logger.error(f"RAG pipeline error in get_openai_chat_response_task: {e}")
-        # --- End RAG Implementation ---
 
         # Refined system prompt building
         user_profile_context = "Not specified."
@@ -718,24 +732,19 @@ def get_openai_chat_response_task(self, user_id: int, session_id: int, message: 
         # Moderation (simplified for task, ideally a utility function)
         OPENAI_MODERATION_CHECKS_TOTAL.labels(target='user_input').inc()
         mod_start_time = time.monotonic()
-        # Use client instance for moderation
         mod_response = client.moderations.create(input=message)
         OPENAI_API_CALL_DURATION_SECONDS.labels(type='moderation', model='text-moderation-latest').observe(time.monotonic() - mod_start_time)
-        OPENAI_API_CALLS_TOTAL.labels(type='moderation', model='text-moderation-latest', status='success').inc() # Assuming mod call itself succeeds
+        OPENAI_API_CALLS_TOTAL.labels(type='moderation', model='text-moderation-latest', status='success').inc()
 
         if mod_response.results[0].flagged:
             OPENAI_MODERATION_FLAGGED_TOTAL.labels(target='user_input').inc()
-            logger.warning(f"User message flagged in task: get_openai_chat_response_task for user {user_id}, session {session_id}") # Added session_id to log
+            logger.warning(f"User message flagged in task: get_openai_chat_response_task for user {user_id}, session {session_id}")
             return {'response': "Input violates guidelines.", 'model_used': 'moderation_filter', 'success': False, 'error': 'flagged_input'}
 
-        # No need to set openai.api_key globally if client instance is used
-
         start_time = time.monotonic()
-        api_call_status = 'error' # Renamed to avoid conflict with task status for metrics
-        ai_response_text = "" # Initialize
+        api_call_status = 'error'
+        ai_response_text = ""
         try:
-            # Simplified: Not including function calling logic directly in task for this refactor stage to keep it focused.
-            # Use client instance for chat completion
             response = client.chat.completions.create(
                 model=model,
                 messages=messages_payload,
@@ -746,18 +755,15 @@ def get_openai_chat_response_task(self, user_id: int, session_id: int, message: 
             api_call_status = 'success'
         except Exception as e:
             logger.error(f"OpenAI API call failed in get_openai_chat_response_task: {e}")
-            # OPENAI_API_CALLS_TOTAL is updated in finally block
-            raise # Re-raise to trigger Celery retry
+            raise
         finally:
             duration = time.monotonic() - start_time
             OPENAI_API_CALL_DURATION_SECONDS.labels(type='chat', model=model).observe(duration)
             OPENAI_API_CALLS_TOTAL.labels(type='chat', model=model, status=api_call_status).inc()
 
-
         # Moderation of AI output (simplified)
         OPENAI_MODERATION_CHECKS_TOTAL.labels(target='ai_output').inc()
         mod_ai_start_time = time.monotonic()
-        # Use client instance for moderation
         mod_response_ai = client.moderations.create(input=ai_response_text)
         OPENAI_API_CALL_DURATION_SECONDS.labels(type='moderation', model='text-moderation-latest').observe(time.monotonic() - mod_ai_start_time)
         OPENAI_API_CALLS_TOTAL.labels(type='moderation', model='text-moderation-latest', status='success').inc()
@@ -765,19 +771,14 @@ def get_openai_chat_response_task(self, user_id: int, session_id: int, message: 
         if mod_response_ai.results[0].flagged:
             OPENAI_MODERATION_FLAGGED_TOTAL.labels(target='ai_output').inc()
             logger.warning(f"AI response flagged in task: get_openai_chat_response_task for user {user_id}, session {session_id}")
-            # Even if flagged, we might want to save a placeholder or the flagged message with a note.
-            # For now, let's follow the pattern of returning an error status.
-            # The actual saving of a "flagged response" message is not done here yet.
-        # If AI output is flagged, we don't save it as a regular message.
             return {'response': "AI output violates content guidelines and was not saved.", 'model_used': 'moderation_filter', 'success': False, 'error': 'flagged_ai_output_not_saved'}
 
-        # Save the AI message to the chat session (only if not flagged)
         try:
             chat_session = ChatSession.objects.get(id=session_id)
             ChatMessage.objects.create(
                 session=chat_session,
                 sender='ai',
-                message_text=ai_response_text # Use the variable that holds the text
+                message_text=ai_response_text
             )
             chat_session.save(update_fields=['updated_at'])
             logger.info(f"Successfully saved AI response for session {session_id}")
@@ -794,7 +795,7 @@ def get_openai_chat_response_task(self, user_id: int, session_id: int, message: 
             'success': True,
             'message_saved': True
         }
-    except Exception as exc: # Outer try-except for Celery retry logic
+    except Exception as exc:
         logger.error(f"Error in get_openai_chat_response_task for user {user_id}, session {session_id}: {exc}")
         raise self.retry(exc=exc, countdown=30 * (2 ** self.request.retries))
 
@@ -809,33 +810,28 @@ def analyze_openai_resume_task(self, resume_text: str, target_job: str = "", use
         api_key = getattr(settings, 'OPENAI_API_KEY', '')
         model = getattr(settings, 'OPENAI_MODEL', 'gpt-4')
 
-        # --- RAG Implementation for Resume Analysis ---
+        # RAG Implementation for Resume Analysis
         rag_context_str = ""
-        if target_job: # Only fetch RAG context if a target job is specified
+        if target_job:
             try:
-                from apps.integrations.services.openai import EmbeddingService # Consolidated
+                from apps.integrations.services.openai import EmbeddingService
                 from apps.common.services import VectorDBService
 
                 embedding_service = EmbeddingService()
                 vdb_service = VectorDBService()
 
-                # Embed the target_job description (or a summary/keywords from it)
-                # For simplicity, embedding the whole target_job string if it's mostly a description.
                 query_embedding_list = embedding_service.generate_embeddings([target_job])
 
                 if query_embedding_list and query_embedding_list[0]:
                     query_embedding = query_embedding_list[0]
 
-                    # Search for KnowledgeArticles related to resume writing or general career advice
                     rag_filter = {'source_type__in': ['career_advice', 'faq_item', 'interview_tips'],
-                                  'metadata__category__icontains': 'resume'} # Example filter
-                    # Or search for articles tagged with 'resume' or 'cv'
-                    # rag_filter = {'metadata__tags__overlap': ['resume', 'cv_writing']}
+                                  'metadata__category__icontains': 'resume'}
 
                     logger.info(f"RAG (ResumeAnalysis): Searching documents with filter: {rag_filter}")
                     similar_docs = vdb_service.search_similar_documents(
                         query_embedding=query_embedding,
-                        top_n=2, # Fetch 1-2 relevant advice articles
+                        top_n=2,
                         filter_criteria=rag_filter
                     )
 
@@ -857,7 +853,6 @@ def analyze_openai_resume_task(self, resume_text: str, target_job: str = "", use
                     logger.warning("RAG (ResumeAnalysis): Could not generate query embedding for target_job.")
             except Exception as e:
                 logger.error(f"RAG pipeline error in analyze_openai_resume_task: {e}")
-        # --- End RAG Implementation ---
 
         # Refined prompt building
         prompt_parts = [
@@ -866,7 +861,7 @@ def analyze_openai_resume_task(self, resume_text: str, target_job: str = "", use
         ]
         if target_job:
             prompt_parts.append(f"\nThe resume is being tailored for the following Target Job (or job type):\n---\n{target_job}\n---")
-        if user_profile_data: # Add user profile context if available
+        if user_profile_data:
             user_exp = user_profile_data.get('experience_level', 'N/A')
             user_skills = ", ".join(user_profile_data.get('skills', [])) or "N/A"
             prompt_parts.append(f"\nUser Profile Context: Experience Level: {user_exp}, Skills: {user_skills}.")
@@ -914,56 +909,17 @@ Please structure your feedback to include:
             }
         except Exception as e:
             logger.error(f"OpenAI API call failed in analyze_openai_resume_task: {e}")
-            raise # Re-raise to trigger Celery retry
+            raise
         finally:
             duration = time.monotonic() - start_time
             OPENAI_API_CALL_DURATION_SECONDS.labels(type='resume_analysis', model=model).observe(duration)
             OPENAI_API_CALLS_TOTAL.labels(type='resume_analysis', model=model, status=status).inc()
 
-    except Exception as exc: # Outer try-except for Celery retry logic
+    except Exception as exc:
         logger.error(f"Error in analyze_openai_resume_task: {exc}")
         raise self.retry(exc=exc, countdown=30 * (2 ** self.request.retries))
 
-# --- Ensure existing OpenAI tasks correctly call service methods if they are also to be made async ---
-# generate_job_embeddings, generate_user_profile_embeddings, analyze_job_match_for_user,
-# and generate_cover_letter_for_application already call the respective service methods.
-# If those service methods are changed to be async launchers, these tasks become the actual workers.
-# No change needed here for those existing tasks, but the service methods they call will be changed.
 
-# --- Prometheus Metrics for OpenAI Tasks ---
-from prometheus_client import Counter, Histogram
-import time
-
-OPENAI_API_CALLS_TOTAL = Counter(
-    'jobraker_openai_api_calls_total',
-    'Total calls made to OpenAI API.',
-    ['type', 'model', 'status'] # type: chat, advice, resume_analysis, embedding, moderation
-)
-
-OPENAI_API_CALL_DURATION_SECONDS = Histogram(
-    'jobraker_openai_api_call_duration_seconds',
-    'Latency of OpenAI API calls.',
-    ['type', 'model']
-)
-
-OPENAI_MODERATION_CHECKS_TOTAL = Counter(
-    'jobraker_openai_moderation_checks_total',
-    'Total moderation checks performed.',
-    ['target'] # target: user_input, ai_output
-)
-
-OPENAI_MODERATION_FLAGGED_TOTAL = Counter(
-    'jobraker_openai_moderation_flagged_total',
-    'Total times content was flagged by moderation.',
-    ['target']
-)
-
-# It's harder to get token counts consistently without parsing responses carefully,
-# so omitting token metrics for now unless the library exposes them easily.
-# --- End Prometheus Metrics ---
-
-
-# --- Tasks for Skyvern API Integration ---
 @shared_task(bind=True, max_retries=3)
 def submit_skyvern_application_task(self, application_id: str, job_url: str, prompt_template: str, user_profile_data: Dict[str, Any], resume_base64: Optional[str] = None, cover_letter_base64: Optional[str] = None):
     """
@@ -977,7 +933,7 @@ def submit_skyvern_application_task(self, application_id: str, job_url: str, pro
         cover_letter_base64: Base64 encoded cover letter content (optional).
     """
     from apps.integrations.services.skyvern import SkyvernAPIClient
-    from apps.jobs.models import Application # Now using the Application model
+    from apps.jobs.models import Application
 
     logger.info(f"Starting Skyvern application task for JobRaker app ID: {application_id}, Job URL: {job_url}")
 
@@ -985,13 +941,11 @@ def submit_skyvern_application_task(self, application_id: str, job_url: str, pro
         application = Application.objects.get(id=application_id)
     except Application.DoesNotExist:
         logger.error(f"Application {application_id} not found in submit_skyvern_application_task.")
-        # Increment a metric for this case if desired
         SKYVERN_APPLICATION_SUBMISSIONS_TOTAL.labels(status='application_not_found').inc()
         return {"status": "error", "application_id": application_id, "error": "Application not found"}
 
     client = SkyvernAPIClient()
 
-    # Construct inputs for Skyvern
     skyvern_inputs = {
         "target_job_url": job_url,
         "user_profile_data": user_profile_data,
@@ -1001,11 +955,9 @@ def submit_skyvern_application_task(self, application_id: str, job_url: str, pro
     if cover_letter_base64:
         skyvern_inputs["cover_letter_base64"] = cover_letter_base64
 
-    prompt = prompt_template.format(job_url=job_url) # Basic prompt formatting
+    prompt = prompt_template.format(job_url=job_url)
 
-    # Potentially get webhook_url from settings or construct it
-    # webhook_url = getattr(settings, 'SKYVERN_WEBHOOK_URL', None)
-    webhook_url = None # Placeholder
+    webhook_url = None
 
     try:
         response = client.run_task(
@@ -1019,30 +971,30 @@ def submit_skyvern_application_task(self, application_id: str, job_url: str, pro
             logger.info(f"Skyvern task created: {skyvern_task_id} for JobRaker app ID: {application_id}")
 
             application.skyvern_task_id = skyvern_task_id
-            application.status = 'submitting_via_skyvern' # Using one of the new statuses
+            application.status = 'submitting_via_skyvern'
             application.save(update_fields=['skyvern_task_id', 'status', 'updated_at'])
 
             SKYVERN_APPLICATION_SUBMISSIONS_TOTAL.labels(status='initiated').inc()
             return {"status": "success", "skyvern_task_id": skyvern_task_id, "application_id": application_id}
         else:
             logger.error(f"Skyvern task creation failed for JobRaker app ID: {application_id}. Response: {response}")
-            application.status = 'skyvern_submission_failed' # New status
-            application.skyvern_response_data = response # Store failure response if any
+            application.status = 'skyvern_submission_failed'
+            application.skyvern_response_data = response
             application.save(update_fields=['status', 'skyvern_response_data', 'updated_at'])
             SKYVERN_APPLICATION_SUBMISSIONS_TOTAL.labels(status='creation_failed').inc()
             return {"status": "failure", "application_id": application_id, "error": "Task creation failed", "response": response}
 
     except Exception as exc:
         logger.error(f"Error in submit_skyvern_application_task for app ID {application_id}: {exc}")
-        if 'application' in locals(): # Check if application object was fetched
-            application.status = 'skyvern_submission_failed' # Or a more generic error status
+        if 'application' in locals():
+            application.status = 'skyvern_submission_failed'
             application.skyvern_response_data = {'error': str(exc)}
             application.save(update_fields=['status', 'skyvern_response_data', 'updated_at'])
         SKYVERN_APPLICATION_SUBMISSIONS_TOTAL.labels(status='task_exception').inc()
         raise self.retry(exc=exc, countdown=60 * (2 ** self.request.retries))
 
 
-@shared_task(bind=True, max_retries=5, default_retry_delay=5 * 60) # Retry less frequently for status checks
+@shared_task(bind=True, max_retries=5, default_retry_delay=5 * 60)
 def check_skyvern_task_status_task(self, skyvern_task_id: str, application_id: str):
     """
     Checks the status of a Skyvern task and updates the JobRaker application.
@@ -1051,7 +1003,7 @@ def check_skyvern_task_status_task(self, skyvern_task_id: str, application_id: s
         application_id: JobRaker internal application ID for tracking.
     """
     from apps.integrations.services.skyvern import SkyvernAPIClient
-    from apps.jobs.models import Application # Now using the Application model
+    from apps.jobs.models import Application
     from django.utils import timezone
 
     logger.info(f"Checking Skyvern task status for task_id: {skyvern_task_id}, JobRaker app ID: {application_id}")
@@ -1061,7 +1013,6 @@ def check_skyvern_task_status_task(self, skyvern_task_id: str, application_id: s
     except Application.DoesNotExist:
         logger.error(f"Application {application_id} with Skyvern task ID {skyvern_task_id} not found in check_skyvern_task_status_task.")
         SKYVERN_APPLICATION_SUBMISSIONS_TOTAL.labels(status='check_app_not_found').inc()
-        # Do not retry if app not found, as it's a data integrity issue.
         return {"status": "error", "application_id": application_id, "error": "Application for Skyvern task not found"}
 
     client = SkyvernAPIClient()
@@ -1071,25 +1022,23 @@ def check_skyvern_task_status_task(self, skyvern_task_id: str, application_id: s
 
         if not status_response:
             logger.warning(f"Failed to get status for Skyvern task {skyvern_task_id}. Will retry.")
-            raise Exception(f"No response from Skyvern for task status {skyvern_task_id}") # Trigger retry
+            raise Exception(f"No response from Skyvern for task status {skyvern_task_id}")
 
-        current_skyvern_status = status_response.get("status") # e.g., PENDING, RUNNING, COMPLETED, FAILED
+        current_skyvern_status = status_response.get("status")
         logger.info(f"Skyvern task {skyvern_task_id} status: {current_skyvern_status}")
 
-        new_jobraker_status = application.status # Keep current status if no change
+        new_jobraker_status = application.status
         skyvern_message = status_response.get("message", "")
 
         if current_skyvern_status == "COMPLETED":
-            new_jobraker_status = 'submitted' # Successfully submitted via Skyvern
-            application.applied_at = timezone.now() # Mark as applied now
+            new_jobraker_status = 'submitted'
+            application.applied_at = timezone.now()
             SKYVERN_APPLICATION_SUBMISSIONS_TOTAL.labels(status='completed_success').inc()
-            # Trigger results fetching task
             retrieve_skyvern_task_results_task.delay(skyvern_task_id, application_id)
         elif current_skyvern_status == "FAILED":
             new_jobraker_status = 'skyvern_submission_failed'
             SKYVERN_APPLICATION_SUBMISSIONS_TOTAL.labels(status='failed').inc()
-            # Store error details from Skyvern if available in results, or this message
-            application.skyvern_response_data = status_response # Store the status response itself
+            application.skyvern_response_data = status_response
         elif current_skyvern_status == "CANCELED":
             new_jobraker_status = 'skyvern_canceled'
             SKYVERN_APPLICATION_SUBMISSIONS_TOTAL.labels(status='canceled').inc()
@@ -1099,40 +1048,31 @@ def check_skyvern_task_status_task(self, skyvern_task_id: str, application_id: s
             SKYVERN_APPLICATION_SUBMISSIONS_TOTAL.labels(status='requires_attention').inc()
             application.skyvern_response_data = status_response
         elif current_skyvern_status in ["PENDING", "RUNNING"]:
-            # Still ongoing, ensure JobRaker status reflects this if it was different
             if application.status not in ['submitting_via_skyvern']:
                  new_jobraker_status = 'submitting_via_skyvern'
             logger.info(f"Skyvern task {skyvern_task_id} is still {current_skyvern_status}.")
-            # No need to explicitly retry here for PENDING/RUNNING if this task is scheduled periodically by Celery Beat,
-            # or if a webhook is the primary update mechanism. If purely polling, a retry might be desired.
-            # For now, assume periodic checks or webhook will handle follow-up.
-        else: # Unknown status
-            logger.warning(f"Unknown Skyvern status '{current_skyvern_status}' for task {skyvern_task_id}.")
-            # Potentially set a generic error or requires attention status
-            # For now, no status change for unknown Skyvern status.
 
-        if new_jobraker_status != application.status or application.applied_at: # If status changed or applied_at set
+        if new_jobraker_status != application.status or application.applied_at:
             application.status = new_jobraker_status
             fields_to_update = ['status', 'updated_at']
-            if application.applied_at: # Ensure applied_at is in update_fields if set
+            if application.applied_at:
                 fields_to_update.append('applied_at')
-            if application.skyvern_response_data: # Ensure response data is in update_fields if set
+            if application.skyvern_response_data:
                 fields_to_update.append('skyvern_response_data')
             application.save(update_fields=fields_to_update)
             logger.info(f"Updated JobRaker app ID {application_id} status to {new_jobraker_status} for Skyvern task {skyvern_task_id}")
 
         return {"status": "polled", "skyvern_task_id": skyvern_task_id, "skyvern_status": current_skyvern_status, "application_id": application_id}
 
-    except Exception as exc: # For API call errors or other issues
+    except Exception as exc:
         logger.error(f"Error in check_skyvern_task_status_task for Skyvern task {skyvern_task_id}: {exc}")
-        raise self.retry(exc=exc) # Celery will use default_retry_delay
+        raise self.retry(exc=exc)
 
 
-# Placeholder for task to retrieve results, can be called after status is COMPLETED
 @shared_task(bind=True, max_retries=3)
 def retrieve_skyvern_task_results_task(self, skyvern_task_id: str, application_id: str):
     from apps.integrations.services.skyvern import SkyvernAPIClient
-    from apps.jobs.models import Application # Now using the Application model
+    from apps.jobs.models import Application
 
     logger.info(f"Retrieving results for Skyvern task {skyvern_task_id}, JobRaker app ID: {application_id}")
 
@@ -1140,7 +1080,6 @@ def retrieve_skyvern_task_results_task(self, skyvern_task_id: str, application_i
         application = Application.objects.get(id=application_id, skyvern_task_id=skyvern_task_id)
     except Application.DoesNotExist:
         logger.error(f"Application {application_id} with Skyvern task ID {skyvern_task_id} not found in retrieve_skyvern_task_results_task.")
-        # No retry, data issue.
         return {"status": "error", "application_id": application_id, "error": "Application for Skyvern task not found"}
 
     client = SkyvernAPIClient()
@@ -1149,12 +1088,8 @@ def retrieve_skyvern_task_results_task(self, skyvern_task_id: str, application_i
 
         if results_response:
             logger.info(f"Results for Skyvern task {skyvern_task_id}: {results_response}")
-            application.skyvern_response_data = results_response # Store the entire raw response
+            application.skyvern_response_data = results_response
 
-            # Potentially parse results_response.get('data') for specific confirmation details
-            # or results_response.get('error_details') if status was FAILED.
-            # For now, storing raw response is sufficient.
-            # If Skyvern task failed and results contain error details, ensure status reflects this.
             skyvern_status_in_results = results_response.get("status")
             if skyvern_status_in_results == "FAILED" and application.status != 'skyvern_submission_failed':
                 application.status = 'skyvern_submission_failed'
@@ -1164,7 +1099,6 @@ def retrieve_skyvern_task_results_task(self, skyvern_task_id: str, application_i
             return {"status": "success", "skyvern_task_id": skyvern_task_id, "application_id": application_id, "results_fetched": True}
         else:
             logger.warning(f"No results data found for Skyvern task {skyvern_task_id} (API call might have returned None or empty).")
-            # Optionally update application model to note that results retrieval was attempted but empty.
             application.skyvern_response_data = {"info": "Results retrieval attempted, no data returned by Skyvern."}
             application.save(update_fields=['skyvern_response_data', 'updated_at'])
             return {"status": "no_results_data", "skyvern_task_id": skyvern_task_id, "application_id": application_id}
@@ -1174,7 +1108,6 @@ def retrieve_skyvern_task_results_task(self, skyvern_task_id: str, application_i
         raise self.retry(exc=exc)
 
 
-# --- Task for KnowledgeArticle RAG Ingestion ---
 @shared_task(bind=True, max_retries=3)
 def process_knowledge_article_for_rag_task(self, article_id: int):
     """
@@ -1184,7 +1117,7 @@ def process_knowledge_article_for_rag_task(self, article_id: int):
     """
     try:
         from apps.common.models import KnowledgeArticle
-        from apps.integrations.services.openai import EmbeddingService # Consolidated
+        from apps.integrations.services.openai import EmbeddingService
         from apps.common.services import VectorDBService
 
         article = KnowledgeArticle.objects.get(id=article_id)
@@ -1197,7 +1130,7 @@ def process_knowledge_article_for_rag_task(self, article_id: int):
 
         embedding_service = EmbeddingService()
         vector_db_service = VectorDBService()
-        model_name = embedding_service.embedding_model # For metrics
+        model_name = embedding_service.embedding_model
 
         text_to_embed = f"Title: {article.title}\nContent: {article.content}"
 
@@ -1209,7 +1142,7 @@ def process_knowledge_article_for_rag_task(self, article_id: int):
             embedding_generation_status = 'success' if article_embedding_list and article_embedding_list[0] else 'no_embedding_generated'
         except Exception as e:
             logger.error(f"EmbeddingService call failed for KnowledgeArticle {article_id}: {e}")
-            raise # Re-raise to trigger Celery retry
+            raise
         finally:
             emb_duration = time.monotonic() - emb_start_time
             OPENAI_API_CALL_DURATION_SECONDS.labels(type=f'embedding_knowledge_{article.source_type}', model=model_name).observe(emb_duration)
@@ -1222,17 +1155,16 @@ def process_knowledge_article_for_rag_task(self, article_id: int):
                 'article_id_original': str(article.id),
                 'title': article.title,
                 'category': article.category,
-                'tags': article.get_tags_list(), # Store as list
-                'source_type_display': article.get_source_type_display() # Store display name
+                'tags': article.get_tags_list(),
+                'source_type_display': article.get_source_type_display()
             }
 
-            # Delete existing RAG document for this article_id to ensure freshness
             vector_db_service.delete_documents(source_type=article.source_type, source_id=str(article.id))
 
             add_status = vector_db_service.add_documents(
-                texts=[text_to_embed], # Could also store just article.content if title is only for metadata
+                texts=[text_to_embed],
                 embeddings=[article_embedding],
-                source_types=[article.source_type], # Use the article's own source_type
+                source_types=[article.source_type],
                 source_ids=[str(article.id)],
                 metadatas=[metadata_for_rag]
             )
@@ -1262,7 +1194,7 @@ def generate_interview_questions_task(self, job_id: str, user_id: Optional[str] 
     Optionally considers user profile for personalization if user_id is provided.
     """
     from apps.jobs.models import Job
-    from apps.accounts.models import UserProfile # For fetching user profile summary
+    from apps.accounts.models import UserProfile
     from apps.integrations.services.openai import OpenAIClient
 
     logger.info(f"Starting interview question generation for Job ID: {job_id}, User ID: {user_id}")
@@ -1277,16 +1209,15 @@ def generate_interview_questions_task(self, job_id: str, user_id: Optional[str] 
     if user_id:
         try:
             user_profile = UserProfile.objects.get(user_id=user_id)
-            # Create a concise summary from the profile. Adjust fields as needed.
             summary_parts = []
             if user_profile.current_title:
                 summary_parts.append(f"Current Title: {user_profile.current_title}")
             if user_profile.experience_level:
-                summary_parts.append(f"Experience Level: {user_profile.get_experience_level_display()}") # Use display value
+                summary_parts.append(f"Experience Level: {user_profile.get_experience_level_display()}")
             if user_profile.skills:
-                summary_parts.append(f"Key Skills: {', '.join(user_profile.skills[:5])}") # Top 5 skills
+                summary_parts.append(f"Key Skills: {', '.join(user_profile.skills[:5])}")
             if user_profile.bio:
-                summary_parts.append(f"Bio Snippet: {user_profile.bio[:200]}...") # Short bio snippet
+                summary_parts.append(f"Bio Snippet: {user_profile.bio[:200]}...")
 
             if summary_parts:
                 user_profile_summary = ". ".join(summary_parts)
@@ -1296,40 +1227,34 @@ def generate_interview_questions_task(self, job_id: str, user_id: Optional[str] 
             logger.warning(f"UserProfile not found for User ID: {user_id}. Proceeding without personalization.")
         except Exception as e:
             logger.error(f"Error fetching or summarizing UserProfile for User ID {user_id}: {e}")
-            # Proceed without personalization if profile fetching fails
+            return {"status": "error", "error": "Error fetching or summarizing UserProfile", "job_id": job_id}
 
     client = OpenAIClient()
-    model_name_client = client.model # For metrics, assuming client has 'model' attribute for chat model
+    model_name_client = client.model
 
     api_call_status = 'error'
     questions = []
-    start_time = time.monotonic() # For duration metric
+    start_time = time.monotonic()
 
     try:
         questions = client.generate_interview_questions(
             job_title=job.title,
             job_description=job.description,
-            # num_questions=10, # Default in client method
-            # question_types=["technical", "behavioral", "situational"], # Example, or let client default
             user_profile_summary=user_profile_summary
         )
         api_call_status = 'success' if questions else 'no_questions_generated'
 
-        # Log result for now. The task result will be stored by Celery if a backend is configured.
         logger.info(f"Generated {len(questions)} interview questions for Job ID: {job_id}. API status: {api_call_status}")
 
-        # The return value of the task is what gets stored in the result backend.
         return {
             "job_id": str(job.id),
             "job_title": job.title,
             "questions": questions,
-            "status": api_call_status # To indicate if questions were successfully generated by OpenAI
+            "status": api_call_status
         }
 
     except Exception as e:
         logger.error(f"OpenAIClient call failed in generate_interview_questions_task for Job {job_id}: {e}", exc_info=True)
-        # Re-raise to allow Celery to retry if max_retries not reached
-        # OPENAI_API_CALLS_TOTAL metric will be updated by the finally block if it's outside this try
         raise self.retry(exc=e, countdown=60 * (2 ** self.request.retries))
     finally:
         duration = time.monotonic() - start_time

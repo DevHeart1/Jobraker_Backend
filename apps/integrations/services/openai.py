@@ -1,25 +1,26 @@
 """
-OpenAI API integration service for AI features.
+OpenAI integration service for Jobraker.
+Provides AI-powered features including chat, embeddings, and job analysis.
 """
 
 import openai
-import logging
 import json
-from typing import List, Dict, Any, Optional, Union
+import logging
+from typing import Dict, List, Optional, Any
 from django.conf import settings
-from django.core.cache import cache
 
 logger = logging.getLogger(__name__)
 
 
 class OpenAIClient:
     """
-    Client for interacting with OpenAI API.
-    Handles embeddings, chat completions, and content generation.
+    Main client for OpenAI API interactions.
     """
     
     def __init__(self):
         self.api_key = getattr(settings, 'OPENAI_API_KEY', '')
+        self.model = getattr(settings, 'OPENAI_MODEL', 'gpt-4o-mini')
+        
         if self.api_key:
             openai.api_key = self.api_key
         else:
@@ -32,25 +33,22 @@ class OpenAIClient:
     
     def generate_embedding(self, text: str, model: str = "text-embedding-3-small") -> List[float]:
         """
-        Generate embedding for text using OpenAI API.
+        Generate embedding for a single text.
         
         Args:
             text: Text to generate embedding for
             model: OpenAI embedding model to use
         
         Returns:
-            List of float values representing the embedding
+            List of floats representing the embedding
         """
         self._validate_api_key()
         
-        # Clean and truncate text if needed
-        cleaned_text = text.strip().replace('\n', ' ')[:8000]  # OpenAI token limit
+        # Clean and truncate text
+        cleaned_text = text.strip().replace('\n', ' ')[:8000]
         
-        # Check cache first
-        cache_key = f"openai_embedding_{hash(cleaned_text)}_{model}"
-        cached_embedding = cache.get(cache_key)
-        if cached_embedding:
-            return cached_embedding
+        if not cleaned_text:
+            return []
         
         try:
             response = openai.embeddings.create(
@@ -58,15 +56,44 @@ class OpenAIClient:
                 input=cleaned_text,
             )
             
-            embedding = response.data[0].embedding
-            
-            # Cache for 24 hours
-            cache.set(cache_key, embedding, 86400)
-            
-            return embedding
+            return response.data[0].embedding
             
         except Exception as e:
             logger.error(f"Error generating embedding: {e}")
+            raise
+
+    def generate_embeddings(self, texts: List[str], model: str = "text-embedding-3-small") -> List[List[float]]:
+        """
+        Generate embeddings for multiple texts.
+        
+        Args:
+            texts: List of texts to generate embeddings for
+            model: OpenAI embedding model to use
+        
+        Returns:
+            List of embeddings corresponding to input texts
+        """
+        self._validate_api_key()
+        
+        if not texts:
+            return []
+        
+        # Clean texts
+        cleaned_texts = [text.strip().replace('\n', ' ')[:8000] for text in texts if text.strip()]
+        
+        if not cleaned_texts:
+            return []
+        
+        try:
+            response = openai.embeddings.create(
+                model=model,
+                input=cleaned_texts,
+            )
+            
+            return [item.embedding for item in response.data]
+            
+        except Exception as e:
+            logger.error(f"Error generating batch embeddings: {e}")
             raise
     
     def generate_embeddings_batch(
@@ -463,6 +490,19 @@ class EmbeddingService:
 
     def __init__(self, client: Optional[OpenAIClient] = None):
         self.client = client or OpenAIClient()
+        self.embedding_model = getattr(settings, 'OPENAI_EMBEDDING_MODEL', 'text-embedding-3-small')
+
+    def generate_embeddings(self, texts: List[str]) -> List[List[float]]:
+        """
+        Generate embeddings for a list of texts.
+        
+        Args:
+            texts: List of texts to generate embeddings for
+        
+        Returns:
+            List of embedding vectors
+        """
+        return self.client.generate_embeddings(texts, model=self.embedding_model)
 
     def generate_job_embeddings(self, job) -> Dict[str, List[float]]:
         """
@@ -480,8 +520,8 @@ class EmbeddingService:
             
             # Combine title and description for comprehensive embedding
             combined_text = f"{job.title}. {job.description[:1000]}"
-            if job.required_skills:
-                combined_text += f" Required skills: {', '.join(job.required_skills)}"
+            if job.skills_required:
+                combined_text += f" Required skills: {', '.join(job.skills_required)}"
             
             combined_embedding = self.client.generate_embedding(combined_text)
             
@@ -512,7 +552,7 @@ class EmbeddingService:
             if user_profile.skills:
                 profile_text += f"Skills: {', '.join(user_profile.skills)}. "
             
-            if user_profile.industries:
+            if hasattr(user_profile, 'industries') and user_profile.industries:
                 profile_text += f"Industries: {', '.join(user_profile.industries)}."
             
             profile_embedding = self.client.generate_embedding(profile_text)

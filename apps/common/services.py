@@ -1,15 +1,211 @@
 """
 Common Services for the Jobraker Application.
-Includes VectorDBService for interacting with pgvector.
+Includes VectorDBService for interacting with pgvector and EmailService for notifications.
 """
 import logging
 from typing import List, Dict, Optional, Any
+from django.core.mail import EmailMultiAlternatives
+from django.template import Template, Context
+from django.conf import settings
+from django.utils import timezone
 # from django.db import connection # For raw SQL if needed with pgvector
 # from pgvector.django import L2Distance # Example import for pgvector operations with Django ORM
 # Assuming models.py is in the same app 'common'
 # from .models import VectorDocument # This will be used once models.py is confirmed
 
 logger = logging.getLogger(__name__)
+
+
+class EmailService:
+    """
+    Service for sending templated emails and notifications.
+    """
+    
+    def __init__(self):
+        self.from_email = getattr(settings, 'DEFAULT_FROM_EMAIL', 'noreply@jobraker.com')
+    
+    def send_templated_email(
+        self,
+        template_name: str,
+        recipient_email: str,
+        context_data: Dict[str, Any],
+        recipient_name: Optional[str] = None
+    ) -> bool:
+        """
+        Send an email using a stored template.
+        
+        Args:
+            template_name: Name of the email template to use
+            recipient_email: Email address to send to
+            context_data: Dictionary of variables for template rendering
+            recipient_name: Optional recipient name for personalization
+        
+        Returns:
+            True if email was sent successfully, False otherwise
+        """
+        try:
+            from apps.common.models import EmailTemplate
+            
+            template = EmailTemplate.objects.get(name=template_name, is_active=True)
+            
+            # Add standard context variables
+            full_context = {
+                'recipient_name': recipient_name or 'User',
+                'site_name': 'Jobraker',
+                'site_url': getattr(settings, 'SITE_URL', 'https://jobraker.com'),
+                'current_year': timezone.now().year,
+                **context_data
+            }
+            
+            # Render templates
+            subject = Template(template.subject_template).render(Context(full_context))
+            html_content = Template(template.html_template).render(Context(full_context))
+            text_content = Template(template.text_template).render(Context(full_context))
+            
+            # Create and send email
+            email = EmailMultiAlternatives(
+                subject=subject,
+                body=text_content,
+                from_email=self.from_email,
+                to=[recipient_email]
+            )
+            email.attach_alternative(html_content, "text/html")
+            
+            email.send()
+            logger.info(f"Email sent successfully to {recipient_email} using template {template_name}")
+            return True
+            
+        except EmailTemplate.DoesNotExist:
+            logger.error(f"Email template '{template_name}' not found or inactive")
+            return False
+        except Exception as e:
+            logger.error(f"Error sending email to {recipient_email}: {e}")
+            return False
+    
+    def send_job_alert_email(
+        self,
+        user_email: str,
+        user_name: str,
+        jobs: List[Dict[str, Any]],
+        alert_name: str
+    ) -> bool:
+        """
+        Send job alert email with matching jobs.
+        
+        Args:
+            user_email: User's email address
+            user_name: User's name
+            jobs: List of job dictionaries
+            alert_name: Name of the job alert
+        
+        Returns:
+            True if email was sent successfully
+        """
+        context = {
+            'alert_name': alert_name,
+            'jobs': jobs,
+            'jobs_count': len(jobs)
+        }
+        
+        return self.send_templated_email(
+            template_name='job_alert',
+            recipient_email=user_email,
+            recipient_name=user_name,
+            context_data=context
+        )
+    
+    def send_application_status_email(
+        self,
+        user_email: str,
+        user_name: str,
+        job_title: str,
+        company_name: str,
+        status: str,
+        additional_info: Optional[str] = None
+    ) -> bool:
+        """
+        Send application status update email.
+        
+        Args:
+            user_email: User's email address
+            user_name: User's name
+            job_title: Title of the job
+            company_name: Name of the company
+            status: Current application status
+            additional_info: Optional additional information
+        
+        Returns:
+            True if email was sent successfully
+        """
+        context = {
+            'job_title': job_title,
+            'company_name': company_name,
+            'status': status,
+            'additional_info': additional_info
+        }
+        
+        return self.send_templated_email(
+            template_name='application_status',
+            recipient_email=user_email,
+            recipient_name=user_name,
+            context_data=context
+        )
+    
+    def send_job_recommendations_email(
+        self,
+        user_email: str,
+        user_name: str,
+        recommended_jobs: List[Dict[str, Any]]
+    ) -> bool:
+        """
+        Send personalized job recommendations email.
+        
+        Args:
+            user_email: User's email address
+            user_name: User's name
+            recommended_jobs: List of recommended job dictionaries
+        
+        Returns:
+            True if email was sent successfully
+        """
+        context = {
+            'recommended_jobs': recommended_jobs,
+            'recommendations_count': len(recommended_jobs)
+        }
+        
+        return self.send_templated_email(
+            template_name='job_recommendations',
+            recipient_email=user_email,
+            recipient_name=user_name,
+            context_data=context
+        )
+    
+    def send_welcome_email(
+        self,
+        user_email: str,
+        user_name: str
+    ) -> bool:
+        """
+        Send welcome email to new users.
+        
+        Args:
+            user_email: User's email address
+            user_name: User's name
+        
+        Returns:
+            True if email was sent successfully
+        """
+        context = {
+            'getting_started_url': f"{getattr(settings, 'SITE_URL', 'https://jobraker.com')}/getting-started",
+            'dashboard_url': f"{getattr(settings, 'SITE_URL', 'https://jobraker.com')}/dashboard"
+        }
+        
+        return self.send_templated_email(
+            template_name='welcome',
+            recipient_email=user_email,
+            recipient_name=user_name,
+            context_data=context
+        )
 
 
 class VectorDBService:

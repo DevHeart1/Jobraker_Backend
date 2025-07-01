@@ -1,63 +1,66 @@
+"""
+Common models for shared functionality across apps.
+"""
+
+import uuid
 from django.db import models
+from django.utils import timezone
 from pgvector.django import VectorField
 from typing import List # Added this import
 
 class VectorDocument(models.Model):
     """
-    Stores text content and its corresponding vector embedding, along with metadata.
-    Used for RAG (Retrieval-Augmented Generation) by enabling similarity searches.
+    Model for storing documents with vector embeddings for RAG and semantic search.
     """
-    id = models.BigAutoField(primary_key=True) # Explicitly adding BigAutoField for clarity
-    text_content = models.TextField(help_text="The actual text content that was embedded.")
-
-    # Assuming usage of OpenAI's text-embedding-3-small or similar, which can have 1536 dimensions.
-    # Adjust dimensions if using a different embedding model.
-    embedding = VectorField(dimensions=1536, help_text="Vector embedding of the text_content.")
-
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    
+    # Document content
+    text_content = models.TextField(help_text="The original text content of the document")
+    
+    # Vector embedding
+    embedding = VectorField(dimensions=1536, null=True, blank=True, help_text="Vector embedding of the text content")
+    
+    # Source information
     source_type = models.CharField(
-        max_length=50,
+        max_length=50, 
         db_index=True,
-        help_text="Type of the source document (e.g., 'job_listing', 'career_article', 'faq')."
+        help_text="Type of source (e.g., 'job_listing', 'knowledge_article', 'career_advice')"
     )
     source_id = models.CharField(
-        max_length=255,
-        null=True,
-        blank=True,
+        max_length=100, 
+        null=True, 
+        blank=True, 
         db_index=True,
-        help_text="Identifier of the original source object (e.g., Job ID, Article ID)."
+        help_text="ID of the source object (can be null for standalone documents)"
     )
+    
+    # Metadata storage
     metadata = models.JSONField(
-        default=dict,
+        default=dict, 
         blank=True,
-        help_text="Additional metadata for filtering or display (e.g., company, location, category, tags)."
+        help_text="Additional metadata for filtering and context"
     )
-
+    
+    # Timestamps
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
-
+    
     class Meta:
-        verbose_name = "Vector Document"
-        verbose_name_plural = "Vector Documents"
-        # Unique constraint to prevent duplicate entries for the same source object
-        unique_together = ('source_type', 'source_id')
+        db_table = 'vector_documents'
+        verbose_name = 'Vector Document'
+        verbose_name_plural = 'Vector Documents'
         indexes = [
-            # A HNSW index is generally recommended for pgvector for performance.
-            # This needs to be created with a separate migration operation if not automatically handled.
-            # Example (to be added in a migration if needed):
-            # HnswIndex(
-            #     name='vectordoc_embedding_hnsw_l2_idx',
-            #     field='embedding',
-            #     m=16, # Default is 16
-            #     ef_construction=64, # Default is 64
-            #     opclasses=['vector_l2_ops'] # For L2 distance, common with normalized OpenAI embeddings
-            # )
-            # Or for cosine similarity: opclasses=['vector_cosine_ops']
-            # For now, basic field indexes are created by db_index=True on source_type and source_id.
-            # The VectorField itself will also typically be indexed by pgvector.
+            models.Index(fields=['source_type', 'source_id']),
+            models.Index(fields=['source_type', 'created_at']),
         ]
-
+        # Allow multiple documents with same source_type and null source_id
+        unique_together = []
+    
     def __str__(self):
-        return f"{self.source_type}:{self.source_id} - {self.text_content[:60]}..."
+        source_info = f"{self.source_type}"
+        if self.source_id:
+            source_info += f":{self.source_id}"
+        return f"VectorDoc ({source_info}) - {self.text_content[:50]}..."
 
     def update_embedding(self, new_text_content: str, new_embedding: list[float]):
         """
@@ -75,58 +78,73 @@ class VectorDocument(models.Model):
 
 class KnowledgeArticle(models.Model):
     """
-    Model for storing curated content like career advice articles, FAQs,
-    interview tips, etc., which can be used for RAG.
+    Model for storing knowledge articles for career advice and job search guidance.
     """
-    SOURCE_TYPE_CHOICES = [
-        ('career_advice', 'Career Advice'),
-        ('faq', 'Frequently Asked Question'),
-        ('interview_tips', 'Interview Tips'),
-        ('company_profile', 'Company Profile'), # Example, if we store general company info
-        ('industry_insight', 'Industry Insight'),
-        ('other', 'Other Curated Content'),
-    ]
-
-    id = models.BigAutoField(primary_key=True)
-    title = models.CharField(max_length=255, help_text="Title of the article or content piece.")
-    slug = models.SlugField(max_length=255, unique=True, help_text="URL-friendly slug for the article.")
-    content = models.TextField(help_text="Full text content of the article.")
-
-    source_type = models.CharField(
-        max_length=50,
-        choices=SOURCE_TYPE_CHOICES,
-        default='other',
-        db_index=True,
-        help_text="The type of curated content (e.g., 'career_advice', 'faq')."
-    )
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    
+    title = models.CharField(max_length=200)
+    content = models.TextField()
+    
+    # Categories for organization
     category = models.CharField(
-        max_length=100,
-        null=True, blank=True,
-        db_index=True,
-        help_text="Optional category for organizing articles (e.g., 'Resume Writing', 'Job Search Strategies')."
+        max_length=50,
+        choices=[
+            ('resume', 'Resume Writing'),
+            ('interview', 'Interview Preparation'),
+            ('salary', 'Salary Negotiation'),
+            ('networking', 'Professional Networking'),
+            ('skills', 'Skill Development'),
+            ('career_change', 'Career Change'),
+            ('job_search', 'Job Search Strategy'),
+            ('cover_letter', 'Cover Letter Writing'),
+            ('general', 'General Career Advice'),
+        ],
+        default='general'
     )
-    tags = models.CharField(
-        max_length=255,
-        null=True, blank=True,
-        help_text="Comma-separated tags for findability (e.g., 'python, django, negotiation')."
-    )
-
-    is_active = models.BooleanField(
-        default=False,
-        db_index=True,
-        help_text="Only active articles will be processed for RAG and shown to users."
-    )
-
+    
+    # Tags for better organization and filtering
+    tags = models.JSONField(default=list, help_text="List of tags for categorization")
+    
+    # SEO and content metadata
+    slug = models.SlugField(max_length=255, unique=True)
+    excerpt = models.TextField(blank=True, help_text="Short description or summary")
+    
+    # Content management
+    is_published = models.BooleanField(default=False)
+    published_at = models.DateTimeField(null=True, blank=True)
+    
+    # Author information (optional, can be linked to User model later)
+    author_name = models.CharField(max_length=100, blank=True)
+    
+    # Analytics
+    view_count = models.PositiveIntegerField(default=0)
+    
+    # Timestamps
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
-
+    
     class Meta:
-        verbose_name = "Knowledge Article"
-        verbose_name_plural = "Knowledge Articles"
-        ordering = ['-updated_at', 'title']
-
+        db_table = 'knowledge_articles'
+        verbose_name = 'Knowledge Article'
+        verbose_name_plural = 'Knowledge Articles'
+        ordering = ['-published_at', '-created_at']
+        indexes = [
+            models.Index(fields=['category', 'is_published']),
+            models.Index(fields=['is_published', '-published_at']),
+        ]
+    
     def __str__(self):
         return self.title
+    
+    def save(self, *args, **kwargs):
+        if self.is_published and not self.published_at:
+            self.published_at = timezone.now()
+        super().save(*args, **kwargs)
+    
+    def increment_view_count(self):
+        """Increment the view count for this article."""
+        self.view_count += 1
+        self.save(update_fields=['view_count'])
 
     def get_tags_list(self) -> List[str]:
         """Returns tags as a list of strings."""
@@ -137,3 +155,54 @@ class KnowledgeArticle(models.Model):
     # In a real application, the saving of this model would trigger
     # a signal to embed its content and add/update it in the VectorDocument table.
     # (This will be part of Phase 2 of this plan step)
+
+
+class EmailTemplate(models.Model):
+    """
+    Model for storing email templates for notifications and communications.
+    """
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    
+    name = models.CharField(max_length=100, unique=True)
+    description = models.TextField(blank=True)
+    
+    # Email content
+    subject_template = models.CharField(max_length=200)
+    html_template = models.TextField(help_text="HTML email template")
+    text_template = models.TextField(help_text="Plain text email template")
+    
+    # Template variables documentation
+    variables = models.JSONField(
+        default=list, 
+        help_text="List of available template variables"
+    )
+    
+    # Categories
+    category = models.CharField(
+        max_length=50,
+        choices=[
+            ('job_alert', 'Job Alert'),
+            ('application_status', 'Application Status'),
+            ('recommendation', 'Job Recommendation'),
+            ('welcome', 'Welcome Email'),
+            ('notification', 'General Notification'),
+            ('reminder', 'Reminder'),
+        ],
+        default='notification'
+    )
+    
+    # Status
+    is_active = models.BooleanField(default=True)
+    
+    # Timestamps
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    
+    class Meta:
+        db_table = 'email_templates'
+        verbose_name = 'Email Template'
+        verbose_name_plural = 'Email Templates'
+        ordering = ['category', 'name']
+    
+    def __str__(self):
+        return f"{self.name} ({self.category})"
