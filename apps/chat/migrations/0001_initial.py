@@ -3,6 +3,8 @@
 from django.conf import settings
 from django.db import migrations, models
 import django.db.models.deletion
+import django.utils.timezone
+import uuid
 
 
 class Migration(migrations.Migration):
@@ -15,101 +17,114 @@ class Migration(migrations.Migration):
 
     operations = [
         migrations.CreateModel(
-            name="ChatSession",
+            name='ChatSession',
             fields=[
-                (
-                    "id",
-                    models.BigAutoField(
-                        auto_created=True,
-                        primary_key=True,
-                        serialize=False,
-                        verbose_name="ID",
-                    ),
-                ),
-                (
-                    "title",
-                    models.CharField(
-                        blank=True,
-                        help_text="Optional title for the chat session.",
-                        max_length=255,
-                        null=True,
-                    ),
-                ),
-                (
-                    "created_at",
-                    models.DateTimeField(
-                        auto_now_add=True,
-                        help_text="Timestamp when the chat session was created.",
-                    ),
-                ),
-                (
-                    "updated_at",
-                    models.DateTimeField(
-                        auto_now=True,
-                        help_text="Timestamp when the chat session was last updated (e.g., new message).",
-                    ),
-                ),
-                (
-                    "user",
-                    models.ForeignKey(
-                        help_text="The user who initiated the chat session.",
-                        on_delete=django.db.models.deletion.CASCADE,
-                        related_name="chat_sessions",
-                        to=settings.AUTH_USER_MODEL,
-                    ),
-                ),
+                ('id', models.UUIDField(
+                    default=uuid.uuid4,
+                    editable=False,
+                    primary_key=True,
+                    serialize=False
+                )),
+                ('title', models.CharField(
+                    max_length=255,
+                    null=True,
+                    blank=True,
+                    help_text="Optional user-defined title for the chat session (e.g., 'Resume Review for Python Role')."
+                )),
+                ('created_at', models.DateTimeField(
+                    auto_now_add=True,
+                    db_index=True
+                )),
+                ('updated_at', models.DateTimeField(
+                    auto_now=True,
+                    db_index=True
+                )),
+                ('last_message_at', models.DateTimeField(
+                    default=django.utils.timezone.now,
+                    db_index=True,
+                    help_text='Timestamp of the last message in this session, for ordering.'
+                )),
+                ('user', models.ForeignKey(
+                    on_delete=django.db.models.deletion.CASCADE,
+                    related_name='chat_sessions',
+                    to=settings.AUTH_USER_MODEL,
+                    help_text='The user who initiated and owns this chat session.'
+                )),
             ],
             options={
-                "verbose_name": "Chat Session",
-                "verbose_name_plural": "Chat Sessions",
-                "ordering": ["-updated_at"],
+                'verbose_name': 'Chat Session',
+                'verbose_name_plural': 'Chat Sessions',
+                'ordering': ['-last_message_at', '-created_at'],
             },
         ),
         migrations.CreateModel(
-            name="ChatMessage",
+            name='ChatMessage',
             fields=[
-                (
-                    "id",
-                    models.BigAutoField(
-                        auto_created=True,
-                        primary_key=True,
-                        serialize=False,
-                        verbose_name="ID",
-                    ),
-                ),
-                (
-                    "sender",
-                    models.CharField(
-                        choices=[("user", "User"), ("ai", "AI")],
-                        help_text="The sender of the message (user or AI).",
-                        max_length=10,
-                    ),
-                ),
-                (
-                    "message_text",
-                    models.TextField(help_text="The content of the chat message."),
-                ),
-                (
-                    "created_at",
-                    models.DateTimeField(
-                        auto_now_add=True,
-                        help_text="Timestamp when the message was created.",
-                    ),
-                ),
-                (
-                    "session",
-                    models.ForeignKey(
-                        help_text="The chat session this message belongs to.",
-                        on_delete=django.db.models.deletion.CASCADE,
-                        related_name="messages",
-                        to="chat.chatsession",
-                    ),
-                ),
+                ('id', models.UUIDField(
+                    default=uuid.uuid4,
+                    editable=False,
+                    primary_key=True,
+                    serialize=False
+                )),
+                ('role', models.CharField(
+                    max_length=10,
+                    choices=[
+                        ('user', 'User'),
+                        ('assistant', 'Assistant'),
+                        ('system', 'System'),
+                        ('function', 'Function')
+                    ],
+                    help_text='The role of the sender of this message (user, assistant, etc.).'
+                )),
+                ('content', models.TextField(
+                    help_text='The text content of the message.'
+                )),
+                ('function_call_data', models.JSONField(
+                    null=True,
+                    blank=True,
+                    help_text="If role is 'assistant' and a function call was requested by AI, stores call details (name, arguments)."
+                )),
+                ('function_name', models.CharField(
+                    max_length=100,
+                    null=True,
+                    blank=True,
+                    help_text="If role is 'function', the name of the function that was called."
+                )),
+                ('timestamp', models.DateTimeField(
+                    auto_now_add=True,
+                    db_index=True
+                )),
+                ('metadata', models.JSONField(
+                    null=True,
+                    blank=True,
+                    default=dict,
+                    help_text='Optional metadata (e.g., OpenAI model used, token counts, processing time).'
+                )),
+                ('session', models.ForeignKey(
+                    on_delete=django.db.models.deletion.CASCADE,
+                    related_name='messages',
+                    to='chat.chatsession',
+                    help_text='The chat session this message belongs to.'
+                )),
             ],
             options={
-                "verbose_name": "Chat Message",
-                "verbose_name_plural": "Chat Messages",
-                "ordering": ["created_at"],
+                'verbose_name': 'Chat Message',
+                'verbose_name_plural': 'Chat Messages',
+                'ordering': ['timestamp'],
             },
+        ),
+        migrations.AddIndex(
+            model_name='chatsession',
+            index=models.Index(
+                fields=['user', '-last_message_at'],
+                name='chat_chatse_user_id_a5d01d_idx',
+            ),
+        ),
+        migrations.AddIndex(
+            model_name='chatmessage',
+            index=models.Index(
+                fields=['session', 'timestamp'],
+                name='chat_chatme_session_4750c7_idx',
+            ),
         ),
     ]
