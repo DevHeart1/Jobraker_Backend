@@ -102,6 +102,10 @@ class OpenAIClient:
         Returns:
             List of float values representing the embedding
         """
+        # Use mock service if API key not configured
+        if self.use_mock:
+            return self.mock_service.generate_embedding(text, model)
+        
         self._validate_api_key()
         
         # Clean and truncate text if needed
@@ -113,6 +117,7 @@ class OpenAIClient:
         if cached_embedding:
             return cached_embedding
         
+        start_time = time.time()
         try:
             response = openai.embeddings.create(
                 model=model,
@@ -124,9 +129,14 @@ class OpenAIClient:
             # Cache for 24 hours
             cache.set(cache_key, embedding, 86400)
             
+            # Record metrics
+            OPENAI_API_CALLS_TOTAL.labels(type='embedding', model=model, status='success').inc()
+            OPENAI_API_CALL_DURATION_SECONDS.labels(type='embedding', model=model).observe(time.time() - start_time)
+            
             return embedding
             
         except Exception as e:
+            OPENAI_API_CALLS_TOTAL.labels(type='embedding', model=model, status='error').inc()
             logger.error(f"Error generating embedding: {e}")
             raise
     
