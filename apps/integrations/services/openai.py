@@ -155,20 +155,32 @@ class OpenAIClient:
         Returns:
             List of embeddings corresponding to input texts
         """
+        # Use mock service if API key not configured
+        if self.use_mock:
+            return self.mock_service.generate_embeddings_batch(texts, model)
+        
         self._validate_api_key()
         
         # Clean texts
         cleaned_texts = [text.strip().replace('\n', ' ')[:8000] for text in texts]
         
+        start_time = time.time()
         try:
             response = openai.embeddings.create(
                 model=model,
                 input=cleaned_texts,
             )
             
-            return [item.embedding for item in response.data]
+            embeddings = [item.embedding for item in response.data]
+            
+            # Record metrics
+            OPENAI_API_CALLS_TOTAL.labels(type='embedding_batch', model=model, status='success').inc()
+            OPENAI_API_CALL_DURATION_SECONDS.labels(type='embedding_batch', model=model).observe(time.time() - start_time)
+            
+            return embeddings
             
         except Exception as e:
+            OPENAI_API_CALLS_TOTAL.labels(type='embedding_batch', model=model, status='error').inc()
             logger.error(f"Error generating batch embeddings: {e}")
             raise
     
