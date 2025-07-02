@@ -8,23 +8,28 @@ from .base import *
 DEBUG = True
 ALLOWED_HOSTS = ['localhost', '127.0.0.1', '0.0.0.0', '*']
 
-# Database for development
-DATABASES = {
-    'default': {
-        'ENGINE': 'django.db.backends.sqlite3',
-        'NAME': BASE_DIR / 'db.sqlite3',
-    }
-}
-
-# Override with PostgreSQL if DATABASE_URL is provided
+# Database for development - SQLite for local development, PostgreSQL for production
 DATABASE_URL = os.getenv('DATABASE_URL')
 if DATABASE_URL:
     try:
         import dj_database_url
-        DATABASES['default'] = dj_database_url.parse(DATABASE_URL)
+        DATABASES = {'default': dj_database_url.parse(DATABASE_URL)}
     except ImportError:
-        # dj_database_url not installed, use environment variables
-        pass
+        # Fallback to SQLite for local development
+        DATABASES = {
+            'default': {
+                'ENGINE': 'django.db.backends.sqlite3',
+                'NAME': BASE_DIR / 'db.sqlite3',
+            }
+        }
+else:
+    # Default SQLite configuration for local development
+    DATABASES = {
+        'default': {
+            'ENGINE': 'django.db.backends.sqlite3',
+            'NAME': BASE_DIR / 'db.sqlite3',
+        }
+    }
 
 # Development-specific middleware
 MIDDLEWARE = [

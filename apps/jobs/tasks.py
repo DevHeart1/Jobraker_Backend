@@ -1,6 +1,7 @@
 from celery import shared_task
 import logging
-# from django.contrib.auth import get_user_model # User = get_user_model()
+from typing import Any
+from django.db.models import Q
 from apps.accounts.models import UserProfile # Assuming UserProfile is in accounts.models
 from apps.jobs.services import JobMatchService # Or JobRecommendationService if created separately
 
@@ -169,22 +170,10 @@ def process_job_alerts_task(self):
                 # For now, we assume each found job is a new notification.
                 # --- End Conceptual Duplicate Prevention ---
 
+                
                 logger.info(f"MATCH FOUND: Alert ID {alert.id} for user {alert.user.id} matched Job ID {job.id} ('{job.title}')")
 
-                # --- Trigger Notification (Conceptual) ---
-                # This would typically involve creating a Notification object in the DB
-                # and/or queuing another task to send email/push.
-                # from apps.notifications.services import NotificationService # Example
-                # NotificationService.create_notification(
-                # user=alert.user,
-                # message_type='job_alert',
-                # content=f"New job matching your alert '{alert.name}': {job.title} at {job.company}",
-                # related_object=job
-                # )
-                # logger.info(f"  -> Conceptual notification triggered for user {alert.user.id}, job {job.id}, alert '{alert.name}'.")
-                # notifications_sent_count += 1 # This will be counted per email sent now
-                # --- End Conceptual Notification Trigger ---
-                pass # Placeholder if no specific action per job other than collecting them
+                # Store match information for email notification below
 
             if matching_jobs.exists():
                 # Prepare and send one email with all matching jobs for this alert
@@ -208,7 +197,6 @@ def process_job_alerts_task(self):
                     message_lines.append("\nYou can manage your alerts here: [Link to Manage Alerts Page]") # Placeholder for actual link
 
                     plain_message = "\n".join(message_lines)
-                    # html_message = ... # Optionally create an HTML version
 
                     if alert.user.email and alert.email_notifications: # Check if user wants email notifications
                         send_mail(
@@ -216,7 +204,6 @@ def process_job_alerts_task(self):
                             plain_message,
                             settings.DEFAULT_FROM_EMAIL, # Ensure this is configured
                             [alert.user.email],
-                            # html_message=html_message, # Optional
                             fail_silently=False,
                         )
                         logger.info(f"Sent job alert email to {alert.user.email} for alert ID: {alert.id} with {matching_jobs.count()} jobs.")
@@ -337,3 +324,141 @@ def send_application_follow_up_reminders(self):
         "processed_count": applications_processed_count,
         "sent_count": reminders_sent_count
     }
+
+
+@shared_task(bind=True, max_retries=2)
+def auto_apply_matching_jobs(self, limit=50):
+    """
+    Automatically apply to jobs for users who have enabled auto-apply and meet criteria.
+    
+    Args:
+        limit: Maximum number of auto-applications to process in this batch
+    """
+    try:
+        from apps.jobs.models import Job, Application
+        from apps.accounts.models import UserProfile
+        from apps.integrations.tasks import submit_skyvern_application_task
+        from django.utils import timezone
+        
+        # Find users with auto-apply enabled who have active profiles
+        auto_apply_users = UserProfile.objects.filter(
+            user__is_active=True,
+            auto_apply_enabled=True,  # Assuming this field exists on UserProfile
+        ).select_related('user')
+        
+        if not auto_apply_users.exists():
+            logger.info("No users found with auto-apply enabled")
+            return {'status': 'no_auto_apply_users', 'processed_count': 0}
+        
+        total_applications_queued = 0
+        users_processed = 0
+        
+        for user_profile in auto_apply_users[:limit]:
+            users_processed += 1
+            user = user_profile.user
+            
+            # Find jobs that match user's criteria and haven't been applied to yet
+            # This is a simplified matching - in practice you'd use more sophisticated logic
+            matching_jobs = Job.objects.filter(
+                status='active',
+                created_at__gte=timezone.now() - timezone.timedelta(days=7),  # Only recent jobs
+            ).exclude(
+                # Exclude jobs already applied to by this user
+                id__in=Application.objects.filter(user=user).values_list('job_id', flat=True)
+            )
+            
+            # Apply additional filters based on user preferences
+            if hasattr(user_profile, 'preferred_job_types') and user_profile.preferred_job_types:
+                matching_jobs = matching_jobs.filter(job_type__in=user_profile.preferred_job_types)
+            
+            if hasattr(user_profile, 'preferred_locations') and user_profile.preferred_locations:
+                location_filter = Q()
+                for location in user_profile.preferred_locations:
+                    location_filter |= Q(location__icontains=location)
+                matching_jobs = matching_jobs.filter(location_filter)
+            
+            if hasattr(user_profile, 'min_salary') and user_profile.min_salary:
+                matching_jobs = matching_jobs.filter(
+                    Q(salary_min__gte=user_profile.min_salary) | 
+                    Q(salary_max__gte=user_profile.min_salary)
+                )
+            
+            # Limit applications per user per run
+            user_daily_limit = getattr(user_profile, 'daily_auto_apply_limit', 5)
+            
+            # Check how many auto-applications were already made today
+            today_start = timezone.now().replace(hour=0, minute=0, second=0, microsecond=0)
+            today_applications = Application.objects.filter(
+                user=user,
+                created_at__gte=today_start,
+                application_method='auto_apply'
+            ).count()
+            
+            remaining_quota = max(0, user_daily_limit - today_applications)
+            
+            if remaining_quota == 0:
+                logger.info(f"User {user.id} has reached daily auto-apply limit")
+                continue
+            
+            # Get jobs to apply to (limited by remaining quota)
+            jobs_to_apply = matching_jobs[:remaining_quota]
+            
+            for job in jobs_to_apply:
+                try:
+                    # Create application record
+                    application = Application.objects.create(
+                        user=user,
+                        job=job,
+                        status='pending',
+                        application_method='auto_apply',
+                        cover_letter=user_profile.default_cover_letter or '',
+                        user_notes='Auto-applied based on user preferences'
+                    )
+                    
+                    # Queue Skyvern application if auto-apply is via Skyvern
+                    if hasattr(user_profile, 'auto_apply_via_skyvern') and user_profile.auto_apply_via_skyvern:
+                        # Prepare user profile data for Skyvern
+                        user_profile_data = {
+                            'full_name': user.get_full_name(),
+                            'email': user.email,
+                            'phone': getattr(user_profile, 'phone', ''),
+                            'current_title': getattr(user_profile, 'current_title', ''),
+                            'experience_level': getattr(user_profile, 'experience_level', ''),
+                            'skills': getattr(user_profile, 'skills', []),
+                            'location': getattr(user_profile, 'location', ''),
+                        }
+                        
+                        # Get resume in base64 if available
+                        resume_base64 = None
+                        if hasattr(user_profile, 'resume_file') and user_profile.resume_file:
+                            try:
+                                import base64
+                                resume_base64 = base64.b64encode(user_profile.resume_file.read()).decode('utf-8')
+                            except Exception as e:
+                                logger.warning(f"Could not encode resume for user {user.id}: {e}")
+                        
+                        # Queue Skyvern application
+                        submit_skyvern_application_task.delay(
+                            application_id=str(application.id),
+                            job_url=job.source_url or f"https://example.com/jobs/{job.id}",
+                            prompt_template="Apply to this job automatically using the provided user profile and resume.",
+                            user_profile_data=user_profile_data,
+                            resume_base64=resume_base64
+                        )
+                    
+                    total_applications_queued += 1
+                    logger.info(f"Queued auto-application for user {user.id} to job {job.id}")
+                    
+                except Exception as e:
+                    logger.error(f"Failed to create auto-application for user {user.id}, job {job.id}: {e}")
+        
+        logger.info(f"Auto-apply batch completed: {users_processed} users processed, {total_applications_queued} applications queued")
+        return {
+            'status': 'success',
+            'users_processed': users_processed,
+            'applications_queued': total_applications_queued
+        }
+        
+    except Exception as exc:
+        logger.error(f"Error in auto_apply_matching_jobs: {exc}")
+        raise self.retry(exc=exc, countdown=300 * (2 ** self.request.retries))

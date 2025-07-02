@@ -5,11 +5,66 @@ OpenAI API integration service for AI features.
 import openai
 import logging
 import json
+import random
+import time
 from typing import List, Dict, Any, Optional, Union
 from django.conf import settings
 from django.core.cache import cache
 
 logger = logging.getLogger(__name__)
+
+# Import centralized metrics
+from apps.common.metrics import (
+    OPENAI_API_CALLS_TOTAL,
+    OPENAI_API_CALL_DURATION_SECONDS,
+    OPENAI_MODERATION_CHECKS_TOTAL,
+    OPENAI_MODERATION_FLAGGED_TOTAL,
+)
+
+
+class OpenAIMockService:
+    """
+    Mock service for development when OpenAI API key is not available.
+    """
+    
+    def generate_embedding(self, text: str, model: str = "text-embedding-3-small") -> List[float]:
+        """Generate a mock embedding vector."""
+        # Generate consistent mock embedding based on text hash
+        import hashlib
+        text_hash = hashlib.md5(text.encode()).hexdigest()
+        random.seed(text_hash)
+        return [random.uniform(-1, 1) for _ in range(1536)]  # OpenAI embedding dimension
+    
+    def generate_embeddings_batch(self, texts: List[str], model: str = "text-embedding-3-small") -> List[List[float]]:
+        """Generate mock embeddings for multiple texts."""
+        return [self.generate_embedding(text, model) for text in texts]
+    
+    def chat_completion(
+        self,
+        messages: List[Dict[str, str]],
+        model: str = "gpt-4o-mini",
+        max_tokens: Optional[int] = None,
+        temperature: float = 0.7,
+        system_prompt: Optional[str] = None,
+    ) -> str:
+        """Generate a mock chat response."""
+        last_message = messages[-1]['content'] if messages else ""
+        
+        # Simple mock responses based on content
+        if 'job' in last_message.lower():
+            return "This is a mock response about job opportunities and career advice. In production, this would be powered by GPT-4o-mini."
+        elif 'resume' in last_message.lower():
+            return "This is a mock resume analysis. In production, this would provide detailed feedback on your resume."
+        else:
+            return "This is a mock AI assistant response. Configure OPENAI_API_KEY to enable real AI responses."
+    
+    def moderate_content(self, text: str) -> Dict[str, Any]:
+        """Mock content moderation."""
+        return {
+            'flagged': False,
+            'categories': {},
+            'category_scores': {},
+        }
 
 
 class OpenAIClient:
@@ -20,13 +75,19 @@ class OpenAIClient:
     
     def __init__(self):
         self.api_key = getattr(settings, 'OPENAI_API_KEY', '')
-        if self.api_key:
+        self.use_mock = not self.api_key or getattr(settings, 'USE_OPENAI_MOCK', False)
+        
+        if self.api_key and not self.use_mock:
             openai.api_key = self.api_key
+            logger.info("OpenAI API client initialized with real API key")
         else:
-            logger.warning("OpenAI API key not configured")
+            logger.warning("OpenAI API key not configured - using mock responses")
+            self.mock_service = OpenAIMockService()
     
     def _validate_api_key(self):
         """Validate that API key is configured."""
+        if self.use_mock:
+            return  # Allow mock operation
         if not self.api_key:
             raise ValueError("OpenAI API key not configured")
     
@@ -408,7 +469,7 @@ class OpenAIClient:
         prompt_lines.extend([
             "\nReturn your response as a JSON list of objects. Each object should have exactly two keys: 'type' (a string describing the question category, e.g., 'Behavioral', 'Technical', 'Situational', 'Role-specific', 'Cultural Fit') and 'question' (the interview question itself).",
             "Ensure the JSON is well-formed.",
-            f"Example format: [{\"type\": \"Behavioral\", \"question\": \"Describe a challenging project you worked on.\"}, ...]"
+            "Example format: [{\"type\": \"Behavioral\", \"question\": \"Describe a challenging project you worked on.\"}, ...]"
         ])
 
         system_prompt = "\n".join(prompt_lines)
@@ -463,6 +524,26 @@ class EmbeddingService:
 
     def __init__(self, client: Optional[OpenAIClient] = None):
         self.client = client or OpenAIClient()
+        self.embedding_model = getattr(settings, 'OPENAI_EMBEDDING_MODEL', 'text-embedding-3-small')
+
+    def generate_embeddings(self, texts: List[str]) -> List[List[float]]:
+        """
+        Generate embeddings for a list of texts.
+        
+        Args:
+            texts: List of texts to generate embeddings for
+        
+        Returns:
+            List of embeddings
+        """
+        if not texts:
+            return []
+        
+        try:
+            return self.client.generate_embeddings_batch(texts, model=self.embedding_model)
+        except Exception as e:
+            logger.error(f"Error generating embeddings: {e}")
+            return []
 
     def generate_job_embeddings(self, job) -> Dict[str, List[float]]:
         """

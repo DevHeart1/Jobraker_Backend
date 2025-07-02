@@ -1,0 +1,46 @@
+# Development Environment Variables for Jobraker Backend
+# Copy this file to .env and update with your actual API keys
+
+# Django Configuration
+DJANGO_SECRET_KEY=your-super-secret-development-key-here
+DJANGO_DEBUG=True
+DJANGO_ALLOWED_HOSTS=localhost,127.0.0.1
+
+# Database Configuration (PostgreSQL)
+DB_NAME=jobraker_dev
+DB_USER=jobraker
+DB_PASSWORD=your_password_here
+DB_HOST=localhost
+DB_PORT=5432
+
+# Redis Configuration
+REDIS_URL=redis://localhost:6379/0
+
+# Celery Configuration
+CELERY_BROKER_URL=redis://localhost:6379/0
+CELERY_RESULT_BACKEND=redis://localhost:6379/0
+
+# External API Keys (Get these from respective providers)
+OPENAI_API_KEY=your-openai-api-key-here
+OPENAI_MODEL=gpt-4o-mini
+OPENAI_EMBEDDING_MODEL=text-embedding-3-small
+
+ADZUNA_APP_ID=your-adzuna-app-id-here
+ADZUNA_API_KEY=your-adzuna-api-key-here
+
+SKYVERN_API_KEY=your-skyvern-api-key-here
+SKYVERN_BASE_URL=https://api.skyvern.com
+
+# Email Configuration (Optional for development)
+EMAIL_BACKEND=django.core.mail.backends.console.EmailBackend
+EMAIL_HOST=
+EMAIL_PORT=
+EMAIL_USE_TLS=
+EMAIL_HOST_USER=
+EMAIL_HOST_PASSWORD=
+
+# Additional Configuration
+CORS_ALLOWED_ORIGINS=http://localhost:3000,http://127.0.0.1:3000
+
+# Logging Level
+LOG_LEVEL=DEBUG

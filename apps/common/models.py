@@ -1,18 +1,23 @@
 from django.db import models
-from pgvector.django import VectorField
 from typing import List # Added this import
+
+# For development, use JSONField to store embeddings as arrays
+# In production with PostgreSQL, this should be replaced with pgvector VectorField
 
 class VectorDocument(models.Model):
     """
     Stores text content and its corresponding vector embedding, along with metadata.
     Used for RAG (Retrieval-Augmented Generation) by enabling similarity searches.
     """
-    id = models.BigAutoField(primary_key=True) # Explicitly adding BigAutoField for clarity
+    id = models.BigAutoField(primary_key=True)
     text_content = models.TextField(help_text="The actual text content that was embedded.")
 
-    # Assuming usage of OpenAI's text-embedding-3-small or similar, which can have 1536 dimensions.
-    # Adjust dimensions if using a different embedding model.
-    embedding = VectorField(dimensions=1536, help_text="Vector embedding of the text_content.")
+    # Store embedding as JSON array for SQLite compatibility
+    # In production PostgreSQL, replace with: VectorField(dimensions=1536)
+    embedding = models.JSONField(
+        default=list,
+        help_text="Vector embedding of the text_content (JSON array for development compatibility)."
+    )
 
     source_type = models.CharField(
         max_length=50,
@@ -21,8 +26,8 @@ class VectorDocument(models.Model):
     )
     source_id = models.CharField(
         max_length=255,
-        null=True,
         blank=True,
+        default='',
         db_index=True,
         help_text="Identifier of the original source object (e.g., Job ID, Article ID)."
     )
@@ -101,13 +106,15 @@ class KnowledgeArticle(models.Model):
     )
     category = models.CharField(
         max_length=100,
-        null=True, blank=True,
+        blank=True,
+        default='',
         db_index=True,
         help_text="Optional category for organizing articles (e.g., 'Resume Writing', 'Job Search Strategies')."
     )
     tags = models.CharField(
         max_length=255,
-        null=True, blank=True,
+        blank=True,
+        default='',
         help_text="Comma-separated tags for findability (e.g., 'python, django, negotiation')."
     )
 

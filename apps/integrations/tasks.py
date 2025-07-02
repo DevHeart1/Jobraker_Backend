@@ -3,13 +3,24 @@ Celery tasks for integration services.
 """
 
 from celery import shared_task
-from typing import Dict, Any, Optional, List # Added for type hints
+from typing import Dict, Any, Optional, List
 from django.utils import timezone
 from django.contrib.auth import get_user_model
 import logging
+import time
 
 logger = logging.getLogger(__name__)
 User = get_user_model()
+
+# Import centralized metrics
+from apps.common.metrics import (
+    OPENAI_API_CALLS_TOTAL,
+    OPENAI_API_CALL_DURATION_SECONDS,
+    OPENAI_MODERATION_CHECKS_TOTAL,
+    OPENAI_MODERATION_FLAGGED_TOTAL,
+    ADZUNA_JOBS_PROCESSED_TOTAL,
+    SKYVERN_APPLICATION_SUBMISSIONS_TOTAL
+)
 
 
 @shared_task(bind=True, max_retries=3)
@@ -136,14 +147,14 @@ def generate_job_embeddings_and_ingest_for_rag(self, job_id: str):
 
             # Delete existing RAG document for this job_id to ensure freshness
             # This uses source_id which is str(job.id) for 'job_listing' type
-            vector_db_service.delete_documents(source_type='job_listing', source_id=str(job.id))
+            vector_db_service.delete_documents(source_type='job_listing', source_ids=[str(job.id)])
 
-            add_status = vector_db_service.add_documents(
-                texts=[rag_text_content],
-                embeddings=[job_embeddings_dict['combined_embedding']], # Use the combined embedding
-                source_types=['job_listing'],
-                source_ids=[str(job.id)],
-                metadatas=[metadata_for_rag]
+            add_status = vector_db_service.add_document(
+                text_content=rag_text_content,
+                embedding=job_embeddings_dict['combined_embedding'], # Use the combined embedding
+                source_type='job_listing',
+                source_id=str(job.id),
+                metadata=metadata_for_rag
             )
             if add_status:
                 rag_ingested_successfully = True
@@ -929,34 +940,6 @@ Please structure your feedback to include:
 # and generate_cover_letter_for_application already call the respective service methods.
 # If those service methods are changed to be async launchers, these tasks become the actual workers.
 # No change needed here for those existing tasks, but the service methods they call will be changed.
-
-# --- Prometheus Metrics for OpenAI Tasks ---
-from prometheus_client import Counter, Histogram
-import time
-
-OPENAI_API_CALLS_TOTAL = Counter(
-    'jobraker_openai_api_calls_total',
-    'Total calls made to OpenAI API.',
-    ['type', 'model', 'status'] # type: chat, advice, resume_analysis, embedding, moderation
-)
-
-OPENAI_API_CALL_DURATION_SECONDS = Histogram(
-    'jobraker_openai_api_call_duration_seconds',
-    'Latency of OpenAI API calls.',
-    ['type', 'model']
-)
-
-OPENAI_MODERATION_CHECKS_TOTAL = Counter(
-    'jobraker_openai_moderation_checks_total',
-    'Total moderation checks performed.',
-    ['target'] # target: user_input, ai_output
-)
-
-OPENAI_MODERATION_FLAGGED_TOTAL = Counter(
-    'jobraker_openai_moderation_flagged_total',
-    'Total times content was flagged by moderation.',
-    ['target']
-)
 
 # It's harder to get token counts consistently without parsing responses carefully,
 # so omitting token metrics for now unless the library exposes them easily.

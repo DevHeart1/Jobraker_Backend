@@ -19,28 +19,31 @@ class ChatSessionAdmin(admin.ModelAdmin):
 
 @admin.register(ChatMessage)
 class ChatMessageAdmin(admin.ModelAdmin):
-    list_display = ('id', 'session_id_display', 'sender', 'message_preview', 'created_at')
-    list_filter = ('sender', 'created_at', 'session__user') # Allow filtering by user of the session
-    search_fields = ('message_text', 'session__id', 'session__user__username')
-    readonly_fields = ('created_at',)
+    list_display = ('id', 'session_id_display', 'role', 'message_preview', 'timestamp')
+    list_filter = ('role', 'timestamp', 'session__user') # Allow filtering by user of the session
+    search_fields = ('content', 'session__id', 'session__user__username')
+    readonly_fields = ('timestamp',)
     list_select_related = ('session', 'session__user') # Optimize queries for list display
 
     fieldsets = (
         (None, {
-            'fields': ('session', 'sender', 'message_text')
+            'fields': ('session', 'role', 'content')
         }),
-        ('Timestamps', {
-            'fields': ('created_at',),
-            'classes': ('collapse',)
+        ('Function Call Data', {
+            'fields': ('function_call_data', 'function_name'),
+            'classes': ('collapse',),
+        }),
+        ('Metadata', {
+            'fields': ('metadata', 'timestamp'),
+            'classes': ('collapse',),
         }),
     )
 
     def session_id_display(self, obj):
-        return obj.session.id
+        return str(obj.session.id)[:8] + "..."
     session_id_display.short_description = "Session ID"
     session_id_display.admin_order_field = 'session__id'
 
-
     def message_preview(self, obj):
-        return (obj.message_text[:50] + '...') if len(obj.message_text) > 50 else obj.message_text
+        return (obj.content[:50] + '...') if len(obj.content) > 50 else obj.content
     message_preview.short_description = 'Message Preview'

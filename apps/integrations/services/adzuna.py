@@ -11,41 +11,18 @@ from django.conf import settings
 from django.utils import timezone
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry # For retry mechanism
-# from django_prometheus.models import ExportModelOperationsMixin # If models were prometheus enabled
-from prometheus_client import Counter, Histogram # Assuming prometheus_client is available
 
 from apps.jobs.models import Job, JobSource
+from apps.common.metrics import (
+    ADZUNA_API_REQUESTS_TOTAL,
+    ADZUNA_API_REQUEST_DURATION_SECONDS,
+    ADZUNA_JOBS_PROCESSED_TOTAL,
+    ADZUNA_API_ERRORS_TOTAL,
+    ADZUNA_CIRCUIT_BREAKER_STATE_CHANGES_TOTAL
+)
 
 logger = logging.getLogger(__name__)
-
-# --- Prometheus Metrics Definition (conceptual, ideally in a metrics.py) ---
-# These would be defined globally or registered with Django Prometheus
-ADZUNA_API_REQUESTS_TOTAL = Counter(
-    'jobraker_adzuna_api_requests_total',
-    'Total requests made to Adzuna API.',
-    ['endpoint', 'status_code', 'country']
-)
-ADZUNA_API_REQUEST_DURATION_SECONDS = Histogram(
-    'jobraker_adzuna_api_request_duration_seconds',
-    'Latency of Adzuna API calls.',
-    ['endpoint', 'country']
-)
-ADZUNA_JOBS_PROCESSED_TOTAL = Counter( # Renamed from ingested for clarity on what AdzunaJobProcessor tracks
-    'jobraker_adzuna_jobs_processed_total',
-    'Total Adzuna jobs processed by the system.',
-    ['country', 'status'] # status: created, updated, skipped, error
-)
-ADZUNA_API_ERRORS_TOTAL = Counter( # More specific than the generic one in _make_request
-    'jobraker_adzuna_api_errors_total',
-    'Total errors encountered during Adzuna API calls from client perspective.',
-    ['endpoint', 'country', 'error_type']
-)
-ADZUNA_CIRCUIT_BREAKER_STATE_CHANGES_TOTAL = Counter(
-    'jobraker_adzuna_circuit_breaker_state_changes_total',
-    'Total number of Adzuna API circuit breaker state changes.',
-    ['new_state']
-)
-# --- End Prometheus Metrics Definition ---
+logger = logging.getLogger(__name__)
 
 # Circuit Breaker States
 STATE_CLOSED = "CLOSED"
@@ -314,7 +291,6 @@ class AdzunaJobProcessor:
                 'source_type': 'api',
                 'base_url': 'https://api.adzuna.com',
                 'is_active': True,
-                'sync_frequency': 'hourly'
             }
         )
         if created:
@@ -372,20 +348,19 @@ class AdzunaJobProcessor:
                 stats['total_found'] += len(jobs)
                 
                 for job_data in jobs:
+                    country_label = where # Assuming 'where' is the country for this context
                     try:
-                        country_label = where # Assuming 'where' is the country for this context
-                        try:
-                            result = self._process_job(job_data, country_label) # Pass country for metrics
-                            stats['processed'] += 1
-                            if result == 'created':
-                                stats['created'] += 1
-                            elif result == 'updated':
-                                stats['updated'] += 1
-                            # 'skipped' is handled by ADZUNA_JOBS_PROCESSED_TOTAL in _process_job
-                        except Exception as e:
-                            logger.error(f"Error processing job {job_data.get('id', 'unknown')}: {e}")
-                            stats['errors'] += 1
-                            ADZUNA_JOBS_PROCESSED_TOTAL.labels(country=country_label, status='error').inc()
+                        result = self._process_job(job_data, country_label) # Pass country for metrics
+                        stats['processed'] += 1
+                        if result == 'created':
+                            stats['created'] += 1
+                        elif result == 'updated':
+                            stats['updated'] += 1
+                        # 'skipped' is handled by ADZUNA_JOBS_PROCESSED_TOTAL in _process_job
+                    except Exception as e:
+                        logger.error(f"Error processing job {job_data.get('id', 'unknown')}: {e}")
+                        stats['errors'] += 1
+                        ADZUNA_JOBS_PROCESSED_TOTAL.labels(country=country_label, status='error').inc()
                 
                 logger.info(f"Processed page {page}: {len(jobs)} jobs")
             
@@ -505,7 +480,7 @@ class AdzunaJobProcessor:
         # Check if job already exists
         existing_job = Job.objects.filter(
             external_id=external_id,
-            source=self.job_source
+            external_source='adzuna'
         ).first()
         
         job_defaults = {
@@ -517,8 +492,9 @@ class AdzunaJobProcessor:
             'salary_min': salary_min,
             'salary_max': salary_max,
             'external_url': external_url,
+            'external_source': 'adzuna',
             'posted_date': posted_date or timezone.now(),
-            'source': self.job_source,
+            'processed_for_matching': False,  # Will be set to True after embedding generation
         }
         
         if existing_job:
@@ -528,12 +504,23 @@ class AdzunaJobProcessor:
                     setattr(existing_job, field, value)
             existing_job.save()
             ADZUNA_JOBS_PROCESSED_TOTAL.labels(country=country_label, status='updated').inc()
+            
+            # Queue job for embedding generation if not already processed
+            if not existing_job.processed_for_matching:
+                from apps.integrations.tasks import generate_job_embeddings_and_ingest_for_rag
+                generate_job_embeddings_and_ingest_for_rag.delay(str(existing_job.id))
+            
             return 'updated'
         else:
             # Create new job
             job_defaults['external_id'] = external_id
-            Job.objects.create(**job_defaults)
+            new_job = Job.objects.create(**job_defaults)
             ADZUNA_JOBS_PROCESSED_TOTAL.labels(country=country_label, status='created').inc()
+            
+            # Queue job for embedding generation
+            from apps.integrations.tasks import generate_job_embeddings_and_ingest_for_rag
+            generate_job_embeddings_and_ingest_for_rag.delay(str(new_job.id))
+            
             return 'created'
     
     def _map_contract_type(self, contract_type: str) -> str:

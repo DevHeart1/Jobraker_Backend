@@ -198,6 +198,17 @@ ADZUNA_APP_ID = os.getenv('ADZUNA_APP_ID', '')
 ADZUNA_API_KEY = os.getenv('ADZUNA_API_KEY', '')
 SKYVERN_API_KEY = os.getenv('SKYVERN_API_KEY', '')
 
+# External API Configuration
+OPENAI_API_KEY = os.getenv('OPENAI_API_KEY', '')
+OPENAI_MODEL = os.getenv('OPENAI_MODEL', 'gpt-4o-mini')
+OPENAI_EMBEDDING_MODEL = os.getenv('OPENAI_EMBEDDING_MODEL', 'text-embedding-3-small')
+
+ADZUNA_APP_ID = os.getenv('ADZUNA_APP_ID', '')
+ADZUNA_API_KEY = os.getenv('ADZUNA_API_KEY', '')
+
+SKYVERN_API_KEY = os.getenv('SKYVERN_API_KEY', '')
+SKYVERN_BASE_URL = os.getenv('SKYVERN_BASE_URL', 'https://api.skyvern.com')
+
 # Pinecone Configuration
 PINECONE_API_KEY = os.getenv('PINECONE_API_KEY', None)
 PINECONE_ENVIRONMENT = os.getenv('PINECONE_ENVIRONMENT', None)
