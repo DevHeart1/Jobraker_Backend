@@ -97,6 +97,8 @@ class Job(models.Model):
     
     # AI and Matching
     job_embedding = VectorField(dimensions=1536, null=True, blank=True)
+    title_embedding = VectorField(dimensions=1536, null=True, blank=True)
+    combined_embedding = VectorField(dimensions=1536, null=True, blank=True)
     processed_for_matching = models.BooleanField(default=False)
     
     # Status and Metadata

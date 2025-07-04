@@ -30,6 +30,22 @@ services:
       timeout: 10s
       retries: 3
 
+  elasticsearch:
+    image: elasticsearch:7.17.15
+    environment:
+      - discovery.type=single-node
+      - "ES_JAVA_OPTS=-Xms512m -Xmx512m"
+      - xpack.security.enabled=false
+    ports:
+      - "9200:9200"
+    volumes:
+      - elasticsearch_data:/usr/share/elasticsearch/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:9200/_cluster/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+
   web:
     build: .
     command: python manage.py runserver 0.0.0.0:8000
@@ -44,11 +60,14 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+      elasticsearch:
+        condition: service_healthy
     environment:
       - DATABASE_URL=postgresql://jobraker_user:jobraker_pass@db:5432/jobraker_db
       - REDIS_URL=redis://redis:6379/0
       - CELERY_BROKER_URL=redis://redis:6379/0
       - CELERY_RESULT_BACKEND=redis://redis:6379/0
+      - ELASTICSEARCH_URL=http://elasticsearch:9200
 
   celery:
     build: .
@@ -60,11 +79,13 @@ services:
     depends_on:
       - db
       - redis
+      - elasticsearch
     environment:
       - DATABASE_URL=postgresql://jobraker_user:jobraker_pass@db:5432/jobraker_db
       - REDIS_URL=redis://redis:6379/0
       - CELERY_BROKER_URL=redis://redis:6379/0
       - CELERY_RESULT_BACKEND=redis://redis:6379/0
+      - ELASTICSEARCH_URL=http://elasticsearch:9200
 
   celery-beat:
     build: .
@@ -76,12 +97,15 @@ services:
     depends_on:
       - db
       - redis
+      - elasticsearch
     environment:
       - DATABASE_URL=postgresql://jobraker_user:jobraker_pass@db:5432/jobraker_db
       - REDIS_URL=redis://redis:6379/0
       - CELERY_BROKER_URL=redis://redis:6379/0
       - CELERY_RESULT_BACKEND=redis://redis:6379/0
+      - ELASTICSEARCH_URL=http://elasticsearch:9200
 
 volumes:
   postgres_data:
   redis_data:
+  elasticsearch_data:

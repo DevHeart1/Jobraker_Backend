@@ -103,15 +103,8 @@ INSTALLED_APPS += [
 CELERY_TASK_ALWAYS_EAGER = True
 CELERY_TASK_EAGER_PROPAGATES = True
 
-# External API Integrations
-ADZUNA_APP_ID = os.getenv('ADZUNA_APP_ID', '')
-ADZUNA_API_KEY = os.getenv('ADZUNA_API_KEY', '')
-
-OPENAI_API_KEY = os.getenv('OPENAI_API_KEY', '')
-OPENAI_MODEL = os.getenv('OPENAI_MODEL', 'gpt-4')
-
-SKYVERN_API_KEY = os.getenv('SKYVERN_API_KEY', '')
-SKYVERN_BASE_URL = os.getenv('SKYVERN_BASE_URL', 'https://api.skyvern.com')
+# External API Integrations - Inheriting from base settings
+# OPENAI_API_KEY, ADZUNA_API_KEY, SKYVERN_API_KEY are defined in base.py
 
 # Celery Configuration
 CELERY_BROKER_URL = os.getenv('CELERY_BROKER_URL', 'redis://localhost:6379/0')

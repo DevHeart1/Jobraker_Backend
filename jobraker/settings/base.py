@@ -6,9 +6,13 @@ Base settings shared across all environments.
 
 import os
 from pathlib import Path
+from dotenv import load_dotenv
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent.parent
+
+# Load environment variables from .env file
+load_dotenv(BASE_DIR / '.env')
 
 # SECURITY WARNING: keep the secret key used in production secret!
 SECRET_KEY = os.getenv('DJANGO_SECRET_KEY', 'django-insecure-change-me-in-production')
@@ -194,16 +198,12 @@ CELERY_TIMEZONE = TIME_ZONE
 
 # External API Configuration
 OPENAI_API_KEY = os.getenv('OPENAI_API_KEY', '')
-ADZUNA_APP_ID = os.getenv('ADZUNA_APP_ID', '')
-ADZUNA_API_KEY = os.getenv('ADZUNA_API_KEY', '')
-SKYVERN_API_KEY = os.getenv('SKYVERN_API_KEY', '')
-
-# External API Configuration
-OPENAI_API_KEY = os.getenv('OPENAI_API_KEY', '')
 OPENAI_MODEL = os.getenv('OPENAI_MODEL', 'gpt-4o-mini')
 OPENAI_EMBEDDING_MODEL = os.getenv('OPENAI_EMBEDDING_MODEL', 'text-embedding-3-small')
 
 ADZUNA_APP_ID = os.getenv('ADZUNA_APP_ID', '')
+ADZUNA_API_KEY = os.getenv('ADZUNA_API_KEY', '')
+SKYVERN_API_KEY = os.getenv('SKYVERN_API_KEY', '')
 ADZUNA_API_KEY = os.getenv('ADZUNA_API_KEY', '')
 
 SKYVERN_API_KEY = os.getenv('SKYVERN_API_KEY', '')

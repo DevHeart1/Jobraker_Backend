@@ -78,7 +78,6 @@ class OpenAIClient:
         self.use_mock = not self.api_key or getattr(settings, 'USE_OPENAI_MOCK', False)
         
         if self.api_key and not self.use_mock:
-            openai.api_key = self.api_key
             logger.info("OpenAI API client initialized with real API key")
         else:
             logger.warning("OpenAI API key not configured - using mock responses")
@@ -119,7 +118,10 @@ class OpenAIClient:
         
         start_time = time.time()
         try:
-            response = openai.embeddings.create(
+            from openai import OpenAI
+            client = OpenAI(api_key=self.api_key)
+            
+            response = client.embeddings.create(
                 model=model,
                 input=cleaned_text,
             )
@@ -166,7 +168,10 @@ class OpenAIClient:
         
         start_time = time.time()
         try:
-            response = openai.embeddings.create(
+            from openai import OpenAI
+            client = OpenAI(api_key=self.api_key)
+            
+            response = client.embeddings.create(
                 model=model,
                 input=cleaned_texts,
             )
@@ -205,6 +210,10 @@ class OpenAIClient:
         Returns:
             Generated response text
         """
+        # Use mock service if API key not configured
+        if self.use_mock:
+            return self.mock_service.chat_completion(messages, model, max_tokens, temperature, system_prompt)
+        
         self._validate_api_key()
         
         # Prepare messages
@@ -218,17 +227,28 @@ class OpenAIClient:
         
         formatted_messages.extend(messages)
         
+        start_time = time.time()
         try:
-            response = openai.chat.completions.create(
+            from openai import OpenAI
+            client = OpenAI(api_key=self.api_key)
+            
+            response = client.chat.completions.create(
                 model=model,
                 messages=formatted_messages,
                 max_tokens=max_tokens,
                 temperature=temperature,
             )
             
-            return response.choices[0].message.content
+            content = response.choices[0].message.content
+            
+            # Record metrics
+            OPENAI_API_CALLS_TOTAL.labels(type='chat', model=model, status='success').inc()
+            OPENAI_API_CALL_DURATION_SECONDS.labels(type='chat', model=model).observe(time.time() - start_time)
+            
+            return content
             
         except Exception as e:
+            OPENAI_API_CALLS_TOTAL.labels(type='chat', model=model, status='error').inc()
             logger.error(f"Error generating chat completion: {e}")
             raise
     
@@ -538,7 +558,47 @@ class OpenAIClient:
             logger.error(f"Error generating interview questions via OpenAI: {e}")
             return []
 
-
+    def moderate_content(self, text: str) -> Dict[str, Any]:
+        """
+        Moderate content using OpenAI's moderation API.
+        
+        Args:
+            text: Text to moderate
+        
+        Returns:
+            Moderation result dictionary
+        """
+        # Use mock service if API key not configured
+        if self.use_mock:
+            return self.mock_service.moderate_content(text)
+        
+        self._validate_api_key()
+        
+        start_time = time.time()
+        try:
+            response = openai.moderations.create(input=text)
+            result = response.results[0]
+            
+            # Record metrics
+            OPENAI_MODERATION_CHECKS_TOTAL.inc()
+            if result.flagged:
+                OPENAI_MODERATION_FLAGGED_TOTAL.inc()
+            
+            return {
+                'flagged': result.flagged,
+                'categories': result.categories.model_dump() if hasattr(result.categories, 'model_dump') else dict(result.categories),
+                'category_scores': result.category_scores.model_dump() if hasattr(result.category_scores, 'model_dump') else dict(result.category_scores),
+            }
+            
+        except Exception as e:
+            logger.error(f"Error moderating content: {e}")
+            # Return safe defaults on error
+            return {
+                'flagged': False,
+                'categories': {},
+                'category_scores': {},
+            }
+    
 class EmbeddingService:
     """
     Service for managing embeddings and semantic search.

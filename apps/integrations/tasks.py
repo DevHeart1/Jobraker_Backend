@@ -527,8 +527,8 @@ def get_openai_job_advice_task(self, user_id: int, advice_type: str, context: st
         text_for_rag_embedding = query_for_rag if query_for_rag else context
         if text_for_rag_embedding:
             try:
-                from apps.integrations.services.openai_service import EmbeddingService
-                from apps.common.services import VectorDBService # Using actual service path
+                from apps.integrations.services.openai import EmbeddingService  # Consolidated
+                from apps.common.services import VectorDBService
 
                 embedding_service = EmbeddingService()
                 vdb_service = VectorDBService() # Service with implemented ORM logic
@@ -599,7 +599,10 @@ Be specific and tailor your advice to the user's profile and question."""
         start_time = time.monotonic()
         status = 'error'
         try:
-            response = openai.ChatCompletion.create(
+            from openai import OpenAI
+            client = OpenAI(api_key=api_key)
+            
+            response = client.chat.completions.create(
                 model=model,
                 messages=[
                     {"role": "system", "content": system_message_content},
