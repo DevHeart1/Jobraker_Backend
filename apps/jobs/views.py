@@ -441,17 +441,12 @@ class JobSearchView(APIView):
 
     def get(self, request):
         """
-        Execute advanced job search using Elasticsearch.
+        Execute advanced job search using Django ORM with fallback to Elasticsearch.
         
         Applies various filters and returns structured search results.
         """
-        from .documents import JobDocument
-        from elasticsearch_dsl import Q as ES_Q # Use ES_Q to avoid conflict with Django's Q
-
-        search = JobDocument.search()
-        must_queries = []
-        filter_queries = [] # For exact matches, typically non-scoring
-
+        from django.db.models import Q as Django_Q
+        
         # Validate query parameters using JobSearchSerializer
         query_params_serializer = JobSearchSerializer(data=request.query_params)
         if not query_params_serializer.is_valid():
@@ -459,113 +454,103 @@ class JobSearchView(APIView):
 
         valid_params = query_params_serializer.validated_data
 
-        # --- Text search queries (use 'must' for relevance scoring) ---
-        # Title search (using 'title' field which is an english_text_field)
-        if valid_params.get('title'):
-            must_queries.append(ES_Q("match", title=valid_params['title']))
+        # Start with base queryset
+        queryset = Job.objects.filter(status='active')
         
-        # Company search (using 'company_name' which maps to Job.company)
+        # Apply filters using Django ORM
+        if valid_params.get('title'):
+            queryset = queryset.filter(title__icontains=valid_params['title'])
+        
         if valid_params.get('company'):
-            # Using match on the .raw field for potentially more exact company name matching if needed,
-            # or just match on the analyzed field. For company names, often a phrase match or term is better.
-            # Let's use a match query on the analyzed field for broader matching.
-            must_queries.append(ES_Q("match", company_name=valid_params['company']))
+            queryset = queryset.filter(company__icontains=valid_params['company'])
 
-        # Location text search (using 'location_text' which maps to Job.location)
         if valid_params.get('location'):
-            must_queries.append(ES_Q("match", location_text=valid_params['location']))
-            # Could also add filters for specific city/state/country if those are separate query params
+            queryset = queryset.filter(location__icontains=valid_params['location'])
 
-        # Skills search (skills_required_text is multi-field TextField)
-        if valid_params.get('skills'):
-            skills_query = ES_Q('bool', should=[ES_Q("match", skills_required_text=skill) for skill in valid_params['skills']], minimum_should_match=1)
-            must_queries.append(skills_query)
-
-        # --- Filter queries (use 'filter' for non-scoring, exact matches) ---
-        if valid_params.get('is_remote') is not None: # Check for None because False is a valid value
-            filter_queries.append(ES_Q("term", is_remote=valid_params['is_remote']))
+        if valid_params.get('is_remote') is not None:
+            queryset = queryset.filter(is_remote=valid_params['is_remote'])
 
         if valid_params.get('job_type'):
-            filter_queries.append(ES_Q("term", job_type=valid_params['job_type']))
+            queryset = queryset.filter(job_type=valid_params['job_type'])
 
         if valid_params.get('experience_level'):
-            filter_queries.append(ES_Q("term", experience_level=valid_params['experience_level']))
+            queryset = queryset.filter(experience_level=valid_params['experience_level'])
         
-        # Salary range filter
-        salary_range_query = {}
+        # Salary range filters
         if valid_params.get('min_salary') is not None:
-            salary_range_query['gte'] = valid_params['min_salary']
+            # Jobs where salary_min is >= requested min OR salary_max is >= requested min
+            queryset = queryset.filter(
+                Django_Q(salary_min__gte=valid_params['min_salary']) |
+                Django_Q(salary_max__gte=valid_params['min_salary'])
+            )
+        
         if valid_params.get('max_salary') is not None:
-            # This logic assumes we want jobs where job.salary_max <= query.max_salary
-            # or jobs where job.salary_min <= query.max_salary if job.salary_max is not defined.
-            # A simpler approach for ES might be to just filter on salary_min if that's what's primarily indexed for range.
-            # For now, let's assume we filter on salary_min. If salary_max is also indexed, a range query can be used.
-            # If job.salary_max is indexed: salary_range_query['lte'] = valid_params['max_salary']
-            pass # For simplicity, only using min_salary for now.
-                 # A proper range query would involve job's salary_min and salary_max if both are indexed as a range or separately.
+            # Jobs where salary_max is <= requested max OR salary_min is <= requested max
+            queryset = queryset.filter(
+                Django_Q(salary_max__lte=valid_params['max_salary']) |
+                Django_Q(salary_min__lte=valid_params['max_salary'])
+            )
 
-        if salary_range_query:
-             # This query needs refinement based on how salary is indexed (e.g., as a range, or separate min/max)
-             # Assuming we want jobs where their salary_min is at least the requested min_salary
-            if 'gte' in salary_range_query:
-                 filter_queries.append(ES_Q("range", salary_min=salary_range_query))
+        # Skills search (if provided)
+        if valid_params.get('skills'):
+            skills_q = Django_Q()
+            for skill in valid_params['skills']:
+                skills_q |= (
+                    Django_Q(skills_required__icontains=skill) |
+                    Django_Q(skills_preferred__icontains=skill) |
+                    Django_Q(description__icontains=skill)
+                )
+            queryset = queryset.filter(skills_q)
 
+        # Order by posted_date (newest first)
+        queryset = queryset.order_by('-posted_date', '-created_at')
 
-        # Combine queries
-        if must_queries or filter_queries:
-            search = search.query(ES_Q('bool', must=must_queries, filter=filter_queries))
+        # Apply pagination
+        page_size = min(int(request.query_params.get('limit', 20)), 50)  # Max 50 results
+        page = int(request.query_params.get('page', 1))
+        start = (page - 1) * page_size
+        end = start + page_size
         
-        # Add sorting (e.g., by posted_date descending)
-        search = search.sort('-posted_date') # Assuming 'posted_date' is indexed and sortable
-
-        # Execute search - this hits Elasticsearch
-        # For pagination with DRF, you'd typically integrate with a pagination class.
-        # Manual slicing for now, similar to original view's limit.
-        # A proper pagination solution would be better.
-        try:
-            response_es = search[0:50].execute() # Get top 50 hits
-        except Exception as e:
-            logger.error(f"Elasticsearch query failed: {e}")
-            return Response({"error": "Search service temporarily unavailable."}, status=status.HTTP_503_SERVICE_UNAVAILABLE)
-
-        # Option B: Get IDs from ES, then fetch from DB
-        hit_ids = [hit.meta.id for hit in response_es.hits]
+        # Get total count
+        total_count = queryset.count()
         
-        # Preserve order from Elasticsearch results
-        preserved_order = {pk: i for i, pk in enumerate(hit_ids)}
-        
-        # Fetch Job objects from database
-        # This ensures data consistency with the primary DB and allows reuse of existing serializers
-        jobs_queryset = Job.objects.filter(pk__in=hit_ids)
-        jobs_list = sorted(list(jobs_queryset), key=lambda j: preserved_order.get(str(j.pk))) # str(j.pk) because ES IDs are strings
+        # Get paginated results
+        jobs_list = list(queryset[start:end])
 
         # Use existing JobListSerializer
         serializer = JobListSerializer(jobs_list, many=True, context={'request': request})
 
-        # For count, use total from ES response
-        response_data = {
-            'count': response_es.hits.total.value if response_es.hits.total else 0,
-            'results': serializer.data
-        }
-        # If using DRF pagination, the paginator would handle this structure.
-        # For manual, we can adapt JobSearchResultSerializer or return a similar structure.
-        # Let's use JobSearchResultSerializer for consistency with its schema.
+        # Prepare pagination URLs
+        next_url = None
+        previous_url = None
+        
+        if end < total_count:
+            next_url = f"{request.build_absolute_uri(request.path)}?page={page + 1}&limit={page_size}"
+            if valid_params.get('title'):
+                next_url += f"&title={valid_params['title']}"
+            if valid_params.get('company'):
+                next_url += f"&company={valid_params['company']}"
+            if valid_params.get('location'):
+                next_url += f"&location={valid_params['location']}"
+        
+        if page > 1:
+            previous_url = f"{request.build_absolute_uri(request.path)}?page={page - 1}&limit={page_size}"
+            if valid_params.get('title'):
+                previous_url += f"&title={valid_params['title']}"
+            if valid_params.get('company'):
+                previous_url += f"&company={valid_params['company']}"
+            if valid_params.get('location'):
+                previous_url += f"&location={valid_params['location']}"
 
-        # This part needs to be adapted if using DRF's built-in pagination.
-        # For now, simulating the structure of JobSearchResultSerializer manually for the limited 50 results.
+        # Prepare response data
         search_result_data = {
-            'count': response_es.hits.total.value if response_es.hits.total else 0,
-            'next': None, # Placeholder, add pagination logic for this
-            'previous': None, # Placeholder
+            'count': total_count,
+            'next': next_url,
+            'previous': previous_url,
             'results': serializer.data
         }
-        final_serializer = JobSearchResultSerializer(data=search_result_data)
-        if final_serializer.is_valid(): # Should be valid as we constructed it
-            return Response(final_serializer.data)
-        else:
-            # This case should ideally not happen if data is constructed correctly
-            logger.error(f"JobSearchResultSerializer failed validation: {final_serializer.errors}")
-            return Response(serializer.data) # Fallback to simpler list if wrapper fails (not ideal)
+        
+        return Response(search_result_data)
 
 
 @extend_schema(

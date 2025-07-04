@@ -314,7 +314,7 @@ def analyze_job_match_for_user(self, user_id, job_id):
             return {'status': 'no_profile', 'user_id': str(user_id)}
         
         client = OpenAIClient()
-        model_name = client.model # Get model name for labels
+        model_name = "gpt-4"  # Default model name for labels
         
         # Prepare user profile text
         profile = user.profile
@@ -397,7 +397,7 @@ def generate_cover_letter_for_application(self, user_id, job_id):
         
         # Get cover letter template if available
         template = profile.cover_letter_template if profile.cover_letter_template else None
-        model_name = client.model # Get model name for labels
+        model_name = "gpt-4"  # Default model name for labels
 
         start_time = time.monotonic()
         api_status = 'error'
@@ -1285,7 +1285,7 @@ def generate_interview_questions_task(self, job_id: str, user_id: Optional[str] 
             # Proceed without personalization if profile fetching fails
 
     client = OpenAIClient()
-    model_name_client = client.model # For metrics, assuming client has 'model' attribute for chat model
+    model_name_client = "gpt-4"  # Default model name for metrics
 
     api_call_status = 'error'
     questions = []
