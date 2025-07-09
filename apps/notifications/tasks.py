@@ -135,9 +135,19 @@ def send_job_recommendations_task(self, user_id: int):
     try:
         user = User.objects.get(id=user_id)
         
+        # Get user profile for recommendations
+        try:
+            user_profile = user.userprofile
+        except:
+            logger.info(f"No user profile found for user {user_id}")
+            return
+        
         # Get job recommendations for user
         matching_service = JobMatchService()
-        recommendations = matching_service.get_job_recommendations(user_id, limit=10)
+        recommendations = matching_service.generate_recommendations_for_user(
+            user_profile.id, 
+            num_recommendations=10
+        )
         
         if not recommendations:
             logger.info(f"No job recommendations found for user {user_id}")
