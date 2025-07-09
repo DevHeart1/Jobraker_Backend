@@ -139,8 +139,17 @@ def extract_text_from_resume(file, file_path: str) -> str:
     """
     Extract text content from resume file based on file type.
     """
-    import PyPDF2
-    import docx
+    try:
+        import PyPDF2
+    except ImportError:
+        logger.error("PyPDF2 not installed. Install with: pip install PyPDF2")
+        return ""
+    
+    try:
+        import docx
+    except ImportError:
+        logger.error("python-docx not installed. Install with: pip install python-docx")
+        return ""
     
     try:
         file_extension = file_path.lower().split('.')[-1]
