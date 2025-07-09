@@ -2,6 +2,8 @@ from celery import shared_task
 import logging
 from typing import Any
 from django.db.models import Q
+from django.utils import timezone
+from datetime import timedelta
 from apps.accounts.models import UserProfile # Assuming UserProfile is in accounts.models
 from apps.jobs.services import JobMatchService # Or JobRecommendationService if created separately
 
@@ -506,3 +508,111 @@ def generate_job_embedding_task(self, job_id: int):
         logger.error(f"An unexpected error occurred during embedding generation for Job ID {job_id}: {exc}")
         self.retry(exc=exc)
         return {'status': 'retry', 'job_id': job_id, 'message': str(exc)}
+
+@shared_task
+def batch_generate_recommendations_for_active_users_task():
+    """
+    Celery task to generate job recommendations for all active users.
+    This task runs daily to update recommendations for users.
+    """
+    from apps.accounts.models import UserProfile
+    from apps.jobs.services import JobMatchService
+    
+    try:
+        # Get all user profiles that have embeddings (indicating they are set up for matching)
+        user_profiles = UserProfile.objects.filter(
+            profile_embedding__isnull=False
+        ).select_related('user')
+        
+        service = JobMatchService()
+        total_processed = 0
+        total_recommendations = 0
+        
+        for profile in user_profiles:
+            try:
+                # Generate recommendations for this user
+                recommendations = service.generate_recommendations_for_user(
+                    user_profile_id=profile.id,
+                    num_recommendations=10
+                )
+                
+                total_processed += 1
+                total_recommendations += len(recommendations)
+                
+                logger.info(f"Generated {len(recommendations)} recommendations for user {profile.user.email}")
+                
+            except Exception as e:
+                logger.error(f"Error generating recommendations for user {profile.user.email}: {e}")
+                continue
+        
+        logger.info(f"Batch recommendation task completed. Processed {total_processed} users, generated {total_recommendations} recommendations.")
+        
+    except Exception as e:
+        logger.error(f"Error in batch_generate_recommendations_for_active_users_task: {e}", exc_info=True)
+
+
+@shared_task
+def process_job_alerts_task():
+    """
+    Celery task to process job alerts and send notifications.
+    """
+    from apps.jobs.models import JobAlert
+    from apps.jobs.services import JobMatchService
+    
+    try:
+        active_alerts = JobAlert.objects.filter(is_active=True).select_related('user')
+        
+        for alert in active_alerts:
+            try:
+                # Here you would implement the logic to find matching jobs
+                # and send notifications to users
+                logger.info(f"Processing job alert {alert.id} for user {alert.user.email}")
+                
+                # Update last_run timestamp
+                alert.last_run = timezone.now()
+                alert.save(update_fields=['last_run'])
+                
+            except Exception as e:
+                logger.error(f"Error processing job alert {alert.id}: {e}")
+                continue
+        
+        logger.info(f"Processed {len(active_alerts)} job alerts")
+        
+    except Exception as e:
+        logger.error(f"Error in process_job_alerts_task: {e}", exc_info=True)
+
+
+@shared_task
+def send_application_follow_up_reminders():
+    """
+    Celery task to send follow-up reminders for applications.
+    """
+    from apps.jobs.models import Application
+    from datetime import timedelta
+    
+    try:
+        # Find applications that need follow-up reminders
+        cutoff_date = timezone.now() - timedelta(days=7)
+        applications = Application.objects.filter(
+            status='submitted',
+            applied_at__lte=cutoff_date,
+            follow_up_reminder_sent_at__isnull=True
+        ).select_related('user', 'job')
+        
+        for application in applications:
+            try:
+                # Here you would implement the logic to send follow-up reminders
+                logger.info(f"Sending follow-up reminder for application {application.id}")
+                
+                # Update reminder sent timestamp
+                application.follow_up_reminder_sent_at = timezone.now()
+                application.save(update_fields=['follow_up_reminder_sent_at'])
+                
+            except Exception as e:
+                logger.error(f"Error sending follow-up reminder for application {application.id}: {e}")
+                continue
+        
+        logger.info(f"Sent follow-up reminders for {len(applications)} applications")
+        
+    except Exception as e:
+        logger.error(f"Error in send_application_follow_up_reminders: {e}", exc_info=True)

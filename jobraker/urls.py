@@ -20,6 +20,7 @@ api_v1_patterns = [
     path('chat/', include('apps.chat.urls')),
     path('notifications/', include('apps.notifications.urls')),
     path('integrations/', include('apps.integrations.urls')),
+    path('common/', include('apps.common.urls')),
 ]
 
 urlpatterns = [
