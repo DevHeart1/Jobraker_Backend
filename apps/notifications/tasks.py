@@ -11,7 +11,7 @@ from django.utils import timezone
 from django.db.models import Q
 from apps.jobs.models import Job, Application, JobAlert
 from apps.notifications.email_service import EmailService
-from apps.jobs.services import JobMatchingService
+from apps.jobs.services import JobMatchService
 
 logger = logging.getLogger(__name__)
 User = get_user_model()
@@ -26,7 +26,7 @@ def send_job_alert_email_task(self, alert_id: int):
         alert = JobAlert.objects.get(id=alert_id, is_active=True)
         
         # Get matching jobs that haven't been sent in this alert
-        matching_service = JobMatchingService()
+        matching_service = JobMatchService()
         
         # Build query based on alert criteria
         query = Q(is_active=True)
@@ -136,7 +136,7 @@ def send_job_recommendations_task(self, user_id: int):
         user = User.objects.get(id=user_id)
         
         # Get job recommendations for user
-        matching_service = JobMatchingService()
+        matching_service = JobMatchService()
         recommendations = matching_service.get_job_recommendations(user_id, limit=10)
         
         if not recommendations:
