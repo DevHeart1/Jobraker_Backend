@@ -72,6 +72,23 @@ app.conf.beat_schedule = {
         'task': 'apps.integrations.tasks_enhanced.reindex_vector_database',
         'schedule': crontab(hour=3, minute=0, day_of_week=1),  # Run weekly on Monday at 3:00 AM UTC
     },
+    # Email notification tasks
+    'process-daily-job-alerts': {
+        'task': 'apps.notifications.tasks.process_daily_job_alerts',
+        'schedule': crontab(hour=9, minute=0),  # Run daily at 9:00 AM UTC
+    },
+    'process-weekly-job-alerts': {
+        'task': 'apps.notifications.tasks.process_weekly_job_alerts',
+        'schedule': crontab(hour=9, minute=0, day_of_week=1),  # Run weekly on Monday at 9:00 AM UTC
+    },
+    'send-weekly-job-recommendations': {
+        'task': 'apps.notifications.tasks.send_weekly_job_recommendations',
+        'schedule': crontab(hour=10, minute=0, day_of_week=1),  # Run weekly on Monday at 10:00 AM UTC
+    },
+    'send-application-follow-up-reminders-enhanced': {
+        'task': 'apps.notifications.tasks.send_application_follow_up_reminders',
+        'schedule': crontab(hour=11, minute=0),  # Run daily at 11:00 AM UTC
+    },
 }
 
 @app.task(bind=True)
