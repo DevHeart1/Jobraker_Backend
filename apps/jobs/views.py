@@ -13,6 +13,7 @@ from .serializers import (
     JobSearchResultSerializer, JobRecommendationSerializer, ApplicationStatsSerializer,
     SuccessResponseSerializer, ErrorResponseSerializer, RecommendedJobSerializer # Added RecommendedJobSerializer
 )
+from .services import JobMatchService
 from rest_framework import generics # For ListAPIView
 import logging # For logging in the view
 
@@ -622,6 +623,58 @@ class JobRecommendationsView(generics.ListAPIView): # Changed to ListAPIView
     #         serializer = self.get_serializer(recommendation)
     #         return Response(serializer.data)
     #     return Response({'error': 'Invalid status provided.'}, status=status.HTTP_400_BAD_REQUEST)
+
+
+@extend_schema(
+    summary="Generate Job Recommendations",
+    description="Triggers the generation of new job recommendations for the authenticated user.",
+    tags=['Jobs', 'Recommendations'],
+    request=None,
+    responses={
+        200: SuccessResponseSerializer,
+        404: ErrorResponseSerializer,
+        500: ErrorResponseSerializer
+    }
+)
+class GenerateRecommendationsView(APIView):
+    """
+    API endpoint to trigger the generation of job recommendations for the authenticated user.
+    
+    This endpoint calls the JobMatchService to find relevant jobs based on the user's profile,
+    filters out jobs they've already interacted with, and stores the new recommendations.
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request):
+        user = request.user
+        try:
+            # The user model should have a one-to-one relation to a profile model.
+            # Common practice is to name it 'userprofile' or 'profile'.
+            # Let's assume it's 'profile' as used in the service.
+            if not hasattr(user, 'profile'):
+                logger.warning(f"User {user.id} does not have a profile to generate recommendations.")
+                return Response(
+                    {"error": "User profile not found. Recommendations cannot be generated without a profile."},
+                    status=status.HTTP_404_NOT_FOUND
+                )
+            
+            user_profile_id = user.profile.id
+            
+            service = JobMatchService()
+            # The number of recommendations can be a parameter if needed
+            recommendations_result = service.generate_recommendations_for_user(user_profile_id=user_profile_id)
+            
+            return Response({
+                "success": True,
+                "message": f"Successfully generated {len(recommendations_result)} new or updated recommendations.",
+                "data": recommendations_result
+            }, status=status.HTTP_200_OK)
+        except Exception as e:
+            logger.error(f"An unexpected error occurred while generating recommendations for user {user.id}: {e}", exc_info=True)
+            return Response(
+                {"error": "An internal error occurred while generating recommendations."},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
 
 
 @extend_schema(

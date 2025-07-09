@@ -671,3 +671,77 @@ class ProfileView(APIView):
                 {'error': str(e)}, 
                 status=status.HTTP_400_BAD_REQUEST
             )
+
+
+@extend_schema(
+    summary="Upload and process resume",
+    description="Upload a resume file for automatic processing and profile enhancement",
+    tags=['Profile'],
+    request={"type": "object", "properties": {"resume": {"type": "string", "format": "binary"}}},
+    responses={
+        202: OpenApiExample(
+            'Resume Upload Accepted',
+            value={
+                'message': 'Resume uploaded successfully and is being processed',
+                'task_id': 'celery-task-id-123'
+            },
+            response_only=True
+        ),
+        400: OpenApiExample(
+            'Invalid File',
+            value={'error': 'Invalid file format or size'},
+            response_only=True
+        )
+    }
+)
+class ResumeUploadView(APIView):
+    """
+    API endpoint for resume upload and processing.
+    
+    Accepts resume files in PDF, DOC, or DOCX format and processes them
+    to extract relevant information for profile enhancement.
+    """
+    permission_classes = [permissions.IsAuthenticated]
+    
+    def post(self, request):
+        """
+        Upload and process resume file.
+        """
+        from .serializers import ResumeUploadSerializer
+        from .tasks import process_resume_task
+        import os
+        
+        serializer = ResumeUploadSerializer(data=request.data)
+        if not serializer.is_valid():
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+        
+        resume_file = serializer.validated_data['resume']
+        
+        try:
+            # Get or create user profile
+            profile, created = UserProfile.objects.get_or_create(user=request.user)
+            
+            # Save resume file
+            if profile.resume:
+                # Delete old resume file
+                profile.resume.delete()
+            
+            profile.resume = resume_file
+            profile.save()
+            
+            # Queue resume processing task
+            task = process_resume_task.delay(
+                user_profile_id=str(profile.id),
+                resume_file_path=profile.resume.name
+            )
+            
+            return Response({
+                'message': 'Resume uploaded successfully and is being processed',
+                'task_id': task.id
+            }, status=status.HTTP_202_ACCEPTED)
+            
+        except Exception as e:
+            return Response(
+                {'error': f'Failed to process resume: {str(e)}'}, 
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )

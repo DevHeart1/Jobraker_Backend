@@ -48,30 +48,26 @@ class ChatSessionListSerializer(serializers.ModelSerializer):
     Includes a preview of the last message and message count.
     """
     last_message_preview = serializers.SerializerMethodField(help_text="A short preview of the last message in the session.")
-    message_count = serializers.SerializerMethodField(help_text="Total number of messages in this session.")
-    # user = UserSerializer(read_only=True)  # Optional, uncomment if you want full user info
-
+    message_count = serializers.SerializerMethodField()
+    
     class Meta:
         model = ChatSession
         fields = [
-            'id',
-            'user',
-            'title',
-            'created_at',
-            'updated_at',
-            'last_message_at',
-            'last_message_preview',
-            'message_count'
+            'id', 'title', 'created_at', 'updated_at', 
+            'last_message_at', 'last_message_preview', 'message_count'
         ]
-        read_only_fields = fields
-
-    def get_last_message_preview(self, obj: ChatSession) -> str | None:
-        last_msg = obj.messages.order_by('-timestamp').first()
-        if last_msg:
-            return f"{last_msg.get_role_display()}: {last_msg.content[:75]}{'...' if len(last_msg.content) > 75 else ''}"
+        read_only_fields = ['id', 'created_at', 'updated_at', 'last_message_at']
+    
+    def get_last_message_preview(self, obj):
+        """Get a preview of the last message."""
+        last_message = obj.messages.order_by('-timestamp').first()
+        if last_message:
+            content = last_message.content
+            return content[:100] + "..." if len(content) > 100 else content
         return None
-
-    def get_message_count(self, obj: ChatSession) -> int:
+    
+    def get_message_count(self, obj):
+        """Get the number of messages in this session."""
         return obj.messages.count()
 
 
@@ -149,3 +145,71 @@ class ChatSessionCreateSerializer(serializers.ModelSerializer):
     class Meta:
         model = ChatSession
         fields = ['title']
+
+
+@extend_schema_serializer(
+    examples=[
+        OpenApiExample(
+            'Send Message Request',
+            summary='Send a message to the AI assistant',
+            description='Request to send a message in a chat session',
+            value={
+                "content": "Can you help me improve my resume for a senior Python developer position?",
+                "session_id": "550e8400-e29b-41d4-a716-446655440000"
+            },
+            request_only=True
+        )
+    ]
+)
+class SendMessageSerializer(serializers.Serializer):
+    """
+    Serializer for sending messages to the AI assistant.
+    """
+    content = serializers.CharField(
+        max_length=10000,
+        help_text="The message content to send to the AI assistant"
+    )
+    session_id = serializers.UUIDField(
+        required=False,
+        allow_null=True,
+        help_text="Optional session ID. If not provided, a new session will be created."
+    )
+    
+    def validate_content(self, value):
+        """Validate message content."""
+        if not value.strip():
+            raise serializers.ValidationError("Message content cannot be empty")
+        return value.strip()
+
+
+@extend_schema_serializer(
+    examples=[
+        OpenApiExample(
+            'Chat Response',
+            summary='AI assistant response',
+            description='Response from the AI assistant including both messages',
+            value={
+                "session_id": "550e8400-e29b-41d4-a716-446655440000",
+                "user_message": {
+                    "id": "660f9500-f39c-52e5-b827-557766551111",
+                    "role": "user",
+                    "content": "Can you help me improve my resume?",
+                    "timestamp": "2025-07-08T10:30:00Z"
+                },
+                "assistant_message": {
+                    "id": "770fa600-f49d-63f6-c938-668877662222",
+                    "role": "assistant",
+                    "content": "I'd be happy to help you improve your resume. Please share your current resume or tell me about your experience and the type of position you're targeting.",
+                    "timestamp": "2025-07-08T10:30:15Z"
+                }
+            }
+        )
+    ]
+)
+class ChatResponseSerializer(serializers.Serializer):
+    """
+    Serializer for chat responses from the AI assistant.
+    """
+    session_id = serializers.UUIDField(help_text="The session ID")
+    user_message = ChatMessageSerializer(help_text="The user's message")
+    assistant_message = ChatMessageSerializer(help_text="The AI assistant's response")

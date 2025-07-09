@@ -594,8 +594,6 @@ Be specific and tailor your advice to the user's profile and question."""
             logger.warning(f"OpenAI API key not configured for task: get_openai_job_advice_task for user {user_id}")
             return {'advice_type': advice_type, 'advice': "Mock advice due to no API key.", 'model_used': 'mock_task', 'success': True}
 
-        openai.api_key = api_key
-
         start_time = time.monotonic()
         status = 'error'
         try:
@@ -904,12 +902,13 @@ Please structure your feedback to include:
             logger.warning("OpenAI API key not configured for task: analyze_openai_resume_task")
             return {'analysis': "Mock resume analysis due to no API key.", 'model_used': 'mock_task', 'success': True}
 
-        openai.api_key = api_key
-
         start_time = time.monotonic()
         status = 'error'
         try:
-            response = openai.ChatCompletion.create(
+            from openai import OpenAI
+            client = OpenAI(api_key=api_key)
+            
+            response = client.chat.completions.create(
                 model=model,
                 messages=[
                     {"role": "system", "content": "You are an expert resume reviewer."},

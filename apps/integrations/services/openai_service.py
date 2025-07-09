@@ -333,32 +333,66 @@ class OpenAIJobAssistant:
         }
 
 
-# Utility functions for easy integration
-def get_job_advice(user_id: int, advice_type: str, context: str = "") -> Dict[str, Any]:
-    """Convenience function for getting job advice."""
-    assistant = OpenAIJobAssistant()
-    
-    # Get user profile if available
-    try:
-        user = User.objects.get(id=user_id)
-        user_profile = {
-            'experience_level': getattr(user.profile, 'experience_level', ''),
-            'skills': getattr(user.profile, 'skills', []),
-            'desired_salary_min': getattr(user.profile, 'desired_salary_min', None),
-            'desired_salary_max': getattr(user.profile, 'desired_salary_max', None),
-            'location': getattr(user.profile, 'location', ''),
-        } if hasattr(user, 'profile') else None
-    except (User.DoesNotExist, AttributeError):
-        user_profile = None
-    
-    return assistant.get_job_advice(user_id, advice_type, context, user_profile)
+class EmbeddingService:
+    """
+    Service for generating text embeddings using OpenAI.
+    """
 
+    def __init__(self):
+        self.api_key = getattr(settings, 'OPENAI_API_KEY', '')
+        self.model = getattr(settings, 'OPENAI_EMBEDDING_MODEL', 'text-embedding-3-small')
+        
+        if self.api_key:
+            self.client = openai.OpenAI(api_key=self.api_key)
+        else:
+            self.client = None
+            logger.warning("OpenAI API key not configured. EmbeddingService will not work.")
 
-def get_chat_response(user_id: int, session_id: int, message: str, history: List[Dict[str, str]] = None) -> Dict[str, Any]:
-    """Convenience function for chat responses."""
-    # This convenience function might need user_profile data if it's commonly used.
-    # For now, just matching the change in chat_response signature.
-    assistant = OpenAIJobAssistant()
-    # Assuming user_profile is not typically passed through this specific convenience function.
-    # If it is, this function signature and call would need to be updated.
-    return assistant.chat_response(user_id=user_id, session_id=session_id, message=message, conversation_history=history, user_profile=None)
+    def generate_embeddings(self, texts: List[str]) -> Optional[List[List[float]]]:
+        """
+        Generates embeddings for a list of texts.
+
+        Args:
+            texts: A list of strings to embed.
+
+        Returns:
+            A list of embedding vectors, or None if the service is not configured or an error occurs.
+        """
+        if not self.client:
+            logger.error("Cannot generate embeddings: OpenAI client is not initialized.")
+            return None
+
+        if not texts:
+            return []
+
+        try:
+            # Replace newlines, which can affect performance
+            texts = [text.replace("\n", " ") for text in texts]
+            
+            response = self.client.embeddings.create(
+                input=texts,
+                model=self.model
+            )
+            
+            embeddings = [item.embedding for item in response.data]
+            logger.info(f"Successfully generated {len(embeddings)} embeddings.")
+            return embeddings
+        except openai.APIError as e:
+            logger.error(f"OpenAI API error while generating embeddings: {e}")
+        except Exception as e:
+            logger.error(f"An unexpected error occurred while generating embeddings: {e}")
+        
+        return None
+
+    def generate_embedding(self, text: str) -> Optional[List[float]]:
+        """
+        Generates an embedding for a single text.
+
+        Args:
+            text: The string to embed.
+
+        Returns:
+            An embedding vector, or None if an error occurs.
+        """
+        embeddings = self.generate_embeddings([text])
+        return embeddings[0] if embeddings else None

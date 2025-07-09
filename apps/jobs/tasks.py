@@ -462,3 +462,47 @@ def auto_apply_matching_jobs(self, limit=50):
     except Exception as exc:
         logger.error(f"Error in auto_apply_matching_jobs: {exc}")
         raise self.retry(exc=exc, countdown=300 * (2 ** self.request.retries))
+
+@shared_task(bind=True, max_retries=3, default_retry_delay=60)
+def generate_job_embedding_task(self, job_id: int):
+    """
+    Celery task to generate and save an embedding for a single job listing.
+    """
+    from apps.jobs.models import Job
+    from apps.integrations.services.openai_service import EmbeddingService
+
+    logger.info(f"Starting embedding generation for Job ID: {job_id}")
+
+    try:
+        job = Job.objects.get(pk=job_id)
+    except Job.DoesNotExist:
+        logger.warning(f"Job with ID {job_id} not found. Cannot generate embedding.")
+        return {'status': 'error', 'message': f'Job {job_id} not found.'}
+
+    try:
+        # Combine relevant fields for a rich embedding
+        text_to_embed = (
+            f"Job Title: {job.title}. "
+            f"Company: {job.company_name}. "
+            f"Description: {job.description}. "
+            f"Skills: {', '.join(job.required_skills) if job.required_skills else 'Not specified'}."
+        )
+
+        embedding_service = EmbeddingService()
+        embedding = embedding_service.generate_embedding(text_to_embed)
+
+        if embedding:
+            job.embedding = embedding
+            job.save(update_fields=['embedding'])
+            logger.info(f"Successfully generated and saved embedding for Job ID: {job_id}")
+            return {'status': 'success', 'job_id': job_id}
+        else:
+            logger.error(f"Failed to generate embedding for Job ID: {job_id}. Service returned None.")
+            # Retry the task
+            self.retry(exc=Exception(f"Embedding generation failed for Job ID {job_id}"))
+            return {'status': 'retry', 'job_id': job_id, 'message': 'Embedding generation failed, retrying.'}
+
+    except Exception as exc:
+        logger.error(f"An unexpected error occurred during embedding generation for Job ID {job_id}: {exc}")
+        self.retry(exc=exc)
+        return {'status': 'retry', 'job_id': job_id, 'message': str(exc)}

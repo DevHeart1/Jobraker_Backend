@@ -35,6 +35,25 @@ def delete_job_document_on_delete(sender, instance, **kwargs):
     except Exception as e:
         print(f"Error deleting Elasticsearch document for Job {instance.pk} on delete: {e}")
 
+@receiver(post_save, sender=Job)
+def trigger_job_embedding_generation(sender, instance, created, **kwargs):
+    """
+    Signal to trigger the Celery task for generating job embeddings
+    when a Job instance is created or updated.
+    """
+    from .tasks import generate_job_embedding_task
+    
+    # We can add more sophisticated logic here, e.g., only update
+    # if key fields like 'description' or 'title' have changed.
+    # For now, we trigger on every save.
+    
+    # Avoid triggering for fixtures or bulk loads if possible
+    if kwargs.get('raw', False):
+        return
+
+    if instance.id:
+        generate_job_embedding_task.delay(instance.id)
+
 # Note: If using ELASTICSEARCH_DSL_AUTOSYNC = True in settings,
 # django-elasticsearch-dsl attempts to handle these signals automatically.
 # However, explicit signal handlers provide more control, especially for error handling

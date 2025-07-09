@@ -1,9 +1,14 @@
 from django.shortcuts import render
+from django.conf import settings
 from rest_framework import viewsets, permissions, status
 from rest_framework.response import Response
 from rest_framework.views import APIView
+from rest_framework.permissions import IsAuthenticated
 from drf_spectacular.utils import extend_schema, OpenApiParameter, OpenApiExample
 from drf_spectacular.openapi import OpenApiTypes
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 @extend_schema(
@@ -306,12 +311,26 @@ class ApiStatusView(APIView):
         Performs health checks and returns comprehensive status information
         for monitoring and diagnostic purposes.
         """
-        # TODO: Implement actual API status checks
-        return Response({
-            'adzuna': {'status': 'active', 'last_sync': None},
-            'openai': {'status': 'active', 'last_request': None},
-            'skyvern': {'status': 'active', 'last_automation': None},
-        })
+        from .services.config_service import APIConfigurationService, test_celery_tasks, test_database_connectivity
+        
+        try:
+            config_service = APIConfigurationService()
+            
+            # Get comprehensive API status
+            api_status = config_service.check_all_apis()
+            
+            # Add Celery and database status
+            api_status['celery'] = test_celery_tasks()
+            api_status['database'] = test_database_connectivity()
+            
+            return Response(api_status, status=status.HTTP_200_OK)
+            
+        except Exception as e:
+            logger.error(f"Error checking API status: {e}")
+            return Response(
+                {"error": "Failed to check API status", "details": str(e)}, 
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
 
 
 @extend_schema(
@@ -373,14 +392,39 @@ class JobSyncView(APIView):
         Queues background tasks for data fetching and processing.
         """
         source = request.data.get('source', 'all')
+        full_sync = request.data.get('full_sync', False)
+        max_days_old = request.data.get('max_days_old', 1)
         
-        # TODO: Trigger Celery tasks for job fetching
-        # This would call the tasks we defined in tasks.py
-        
-        return Response({
-            'message': f'Job sync triggered for {source}',
-            'status': 'queued'
-        })
+        try:
+            from .tasks import fetch_adzuna_jobs
+            
+            if source == 'adzuna' or source == 'all':
+                # Trigger Adzuna job fetching
+                task = fetch_adzuna_jobs.delay(
+                    categories=None,  # Fetch all categories
+                    max_days_old=max_days_old
+                )
+                
+                return Response({
+                    'message': f'Job sync triggered for {source}',
+                    'status': 'queued',
+                    'task_id': task.id,
+                    'source': source,
+                    'max_days_old': max_days_old
+                }, status=status.HTTP_200_OK)
+            
+            else:
+                return Response({
+                    'error': f'Unsupported source: {source}',
+                    'supported_sources': ['adzuna', 'all']
+                }, status=status.HTTP_400_BAD_REQUEST)
+                
+        except Exception as e:
+            logger.error(f"Error triggering job sync for {source}: {e}")
+            return Response({
+                'error': 'Failed to trigger job sync',
+                'details': str(e)
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
 @extend_schema(
@@ -449,18 +493,36 @@ class ApiTestView(APIView):
         
         Performs authentication test and basic API call to verify connectivity.
         """
-        # TODO: Implement actual API connection tests
-        if service in ['adzuna', 'openai', 'skyvern']:
+        from .services.config_service import APIConfigurationService
+        
+        try:
+            config_service = APIConfigurationService()
+            
+            if service == 'adzuna':
+                result = config_service.check_adzuna_api()
+            elif service == 'openai':
+                result = config_service.check_openai_api()
+            elif service == 'skyvern':
+                result = config_service.check_skyvern_api()
+            else:
+                return Response({
+                    'error': f'Unknown service: {service}',
+                    'supported_services': ['adzuna', 'openai', 'skyvern']
+                }, status=status.HTTP_400_BAD_REQUEST)
+            
+            # Add service name to result
+            result['service'] = service
+            
+            return Response(result, status=status.HTTP_200_OK)
+            
+        except Exception as e:
+            logger.error(f"Error testing {service} API: {e}")
             return Response({
                 'service': service,
-                'status': 'connected',
-                'response_time': 200,
-                'message': f'{service.title()} API connection test successful'
-            })
-        else:
-            return Response({
-                'error': f'Unknown service: {service}'
-            }, status=status.HTTP_400_BAD_REQUEST)
+                'status': 'error',
+                'message': f'Failed to test {service} API connection',
+                'error': str(e)
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
 @extend_schema(
@@ -519,11 +581,54 @@ class IntegrationConfigView(APIView):
         
         Returns configuration for all enabled integrations.
         """
-        # TODO: Implement actual config retrieval
-        return Response({
-            'message': 'Integration configuration retrieval coming soon',
-            'integrations': {}
-        })
+        from .services.config_service import APIConfigurationService
+        
+        try:
+            config_service = APIConfigurationService()
+            
+            # Get quick status without making API calls
+            quick_status = config_service.get_quick_status()
+            
+            # Build configuration response
+            config_data = {
+                'adzuna': {
+                    'configured': quick_status['adzuna_configured'],
+                    'app_id_set': bool(config_service.adzuna_app_id),
+                    'api_key_set': bool(config_service.adzuna_api_key),
+                    'sync_frequency': 'hourly',  # From Celery beat schedule
+                    'max_jobs_per_sync': 1000
+                },
+                'openai': {
+                    'configured': quick_status['openai_configured'],
+                    'api_key_set': bool(config_service.openai_api_key),
+                    'model': getattr(settings, 'OPENAI_MODEL', 'gpt-4o-mini'),
+                    'embedding_model': getattr(settings, 'OPENAI_EMBEDDING_MODEL', 'text-embedding-3-small')
+                },
+                'skyvern': {
+                    'configured': quick_status['skyvern_configured'],
+                    'api_key_set': bool(config_service.skyvern_api_key),
+                    'base_url': config_service.skyvern_base_url,
+                    'max_concurrent_tasks': 5,
+                    'retry_attempts': 3
+                },
+                'summary': {
+                    'all_configured': quick_status['all_configured'],
+                    'total_configured': sum([
+                        quick_status['openai_configured'],
+                        quick_status['adzuna_configured'], 
+                        quick_status['skyvern_configured']
+                    ])
+                }
+            }
+            
+            return Response(config_data, status=status.HTTP_200_OK)
+            
+        except Exception as e:
+            logger.error(f"Error retrieving integration config: {e}")
+            return Response({
+                'error': 'Failed to retrieve configuration',
+                'details': str(e)
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
     
     @extend_schema(
         summary="Update integration configuration",

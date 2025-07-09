@@ -16,6 +16,7 @@ urlpatterns = [
     # Job search and management
     path('search/', views.JobSearchView.as_view(), name='job_search'),
     path('recommendations/', views.JobRecommendationsView.as_view(), name='job_recommendations'),
+    path('recommendations/generate/', views.GenerateRecommendationsView.as_view(), name='generate_job_recommendations'),
     path('auto-apply/', views.AutoApplyView.as_view(), name='auto_apply'),
     
     # Application management

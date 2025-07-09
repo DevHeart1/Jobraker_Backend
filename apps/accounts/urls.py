@@ -28,5 +28,8 @@ urlpatterns = [
     path('change-password/', views.ChangePasswordView.as_view(), name='change_password'),
     
     # Profile management
+    path('upload-resume/', views.ResumeUploadView.as_view(), name='upload_resume'),
+    
+    # Include router URLs
     path('', include(router.urls)),
 ]

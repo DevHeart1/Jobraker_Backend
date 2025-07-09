@@ -142,17 +142,16 @@ class VectorDBService:
                         # Handle JSONField queries
                         queryset = queryset.filter(**{key: value})
             
-            # Perform similarity search using cosine distance
+            # Perform similarity search using cosine distance and annotate the distance
             # Lower distance = higher similarity
-            similar_docs = queryset.order_by(
-                CosineDistance('embedding', query_embedding)
-            )[:top_n * 2]  # Get more than needed to filter by threshold
+            similar_docs = queryset.annotate(
+                distance=CosineDistance('embedding', query_embedding)
+            ).order_by('distance')[:top_n * 2]  # Get more than needed to filter by threshold
             
             results = []
             for doc in similar_docs:
                 # Calculate similarity score (1 - cosine_distance)
-                # Note: This is an approximation - in production you might want to calculate exact cosine similarity
-                similarity_score = 1 - doc.embedding.cosine_distance(query_embedding) if hasattr(doc.embedding, 'cosine_distance') else 0.8
+                similarity_score = 1 - doc.distance
                 
                 if similarity_score >= similarity_threshold:
                     results.append({

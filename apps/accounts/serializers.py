@@ -67,3 +67,26 @@ class ChangePasswordSerializer(serializers.Serializer):
         except ValidationError as e:
             raise serializers.ValidationError(e.messages)
         return value
+
+
+class ResumeUploadSerializer(serializers.Serializer):
+    """Serializer for resume upload and processing."""
+    resume = serializers.FileField(
+        help_text="Resume file (PDF, DOC, or DOCX format, max 5MB)"
+    )
+    
+    def validate_resume(self, value):
+        """Validate resume file format and size."""
+        # Check file size (5MB limit)
+        if value.size > 5 * 1024 * 1024:
+            raise serializers.ValidationError("Resume file size must be less than 5MB")
+        
+        # Check file extension
+        allowed_extensions = ['.pdf', '.doc', '.docx']
+        file_extension = value.name.lower().split('.')[-1]
+        if f'.{file_extension}' not in allowed_extensions:
+            raise serializers.ValidationError(
+                "Resume must be in PDF, DOC, or DOCX format"
+            )
+        
+        return value
