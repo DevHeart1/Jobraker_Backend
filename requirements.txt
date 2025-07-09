@@ -44,6 +44,9 @@ pinecone-client>=3.0.0 # Added for VectorDBService
 PyPDF2>=3.0.0
 python-docx>=0.8.11
 
+# Mathematical Operations
+numpy>=1.24.0
+
 # Search (Elasticsearch)
 django-elasticsearch-dsl>=7.2,<8.0 # For ES 7.x compatibility, adjust if using ES 8.x
 elasticsearch>=7.0,<8.0 # Base client, ensure compatibility with ES version
