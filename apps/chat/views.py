@@ -11,7 +11,9 @@ from .serializers import (
     ChatSessionSerializer,
     ChatSessionListSerializer,
     ChatSessionCreateSerializer,
-    ChatMessageSerializer
+    ChatMessageSerializer,
+    SendMessageSerializer,
+    ChatResponseSerializer
 )
 
 # Optional: for job-specific advice views later
@@ -23,6 +25,111 @@ class StandardResultsSetPagination(PageNumberPagination):
     page_size = 10
     page_size_query_param = 'page_size'
     max_page_size = 100
+
+
+@extend_schema(
+    summary="Send chat message",
+    description="Send a message to the AI assistant and receive a response",
+    tags=['Chat'],
+    request=SendMessageSerializer,
+    responses={
+        200: ChatResponseSerializer,
+        400: OpenApiResponse(description="Validation Error"),
+        401: OpenApiResponse(description="Authentication required")
+    }
+)
+class SendMessageView(APIView):
+    """
+    API endpoint for sending messages to the AI assistant.
+    """
+    permission_classes = [permissions.IsAuthenticated]
+    
+    def post(self, request):
+        """
+        Send a message to the AI assistant and get a response.
+        """
+        from apps.integrations.services.openai_service import OpenAIService
+        
+        serializer = SendMessageSerializer(data=request.data)
+        if not serializer.is_valid():
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+        
+        content = serializer.validated_data['content']
+        session_id = serializer.validated_data.get('session_id')
+        
+        try:
+            # Get or create chat session
+            if session_id:
+                try:
+                    session = ChatSession.objects.get(id=session_id, user=request.user)
+                except ChatSession.DoesNotExist:
+                    return Response(
+                        {'error': 'Chat session not found'}, 
+                        status=status.HTTP_404_NOT_FOUND
+                    )
+            else:
+                # Create new session
+                session = ChatSession.objects.create(
+                    user=request.user,
+                    title=f"Chat started at {timezone.now().strftime('%Y-%m-%d %H:%M')}"
+                )
+            
+            # Create user message
+            user_message = ChatMessage.objects.create(
+                session=session,
+                role='user',
+                content=content
+            )
+            
+            # Get conversation history for context
+            recent_messages = session.messages.order_by('-timestamp')[:10]
+            conversation_history = []
+            
+            for msg in reversed(recent_messages):
+                conversation_history.append({
+                    'role': msg.role,
+                    'content': msg.content
+                })
+            
+            # Generate AI response
+            openai_service = OpenAIService()
+            
+            # Create system message for job search context
+            system_message = """You are a helpful AI assistant specialized in job search and career advice. 
+            You help users with resume reviews, interview preparation, job recommendations, and career guidance.
+            Be professional, supportive, and provide actionable advice."""
+            
+            # Prepare messages for OpenAI
+            messages = [{'role': 'system', 'content': system_message}]
+            messages.extend(conversation_history)
+            
+            ai_response = openai_service.generate_chat_completion(messages)
+            
+            # Create assistant message
+            assistant_message = ChatMessage.objects.create(
+                session=session,
+                role='assistant',
+                content=ai_response,
+                metadata={'model_used': 'gpt-4o-mini'}
+            )
+            
+            # Update session timestamp
+            session.update_last_message_at()
+            
+            # Serialize response
+            response_data = {
+                'session_id': session.id,
+                'user_message': ChatMessageSerializer(user_message).data,
+                'assistant_message': ChatMessageSerializer(assistant_message).data
+            }
+            
+            return Response(response_data, status=status.HTTP_200_OK)
+            
+        except Exception as e:
+            return Response(
+                {'error': f'Failed to process message: {str(e)}'}, 
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
 
 
 # --- ChatSession ViewSet ---

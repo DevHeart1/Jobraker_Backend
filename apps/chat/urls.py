@@ -12,7 +12,7 @@ router.register(r'sessions', views.ChatSessionViewSet, basename='chatsession')
 
 urlpatterns = [
     # Chat endpoints
-    path('send/', views.ChatView.as_view(), name='chat'),
+    path('send/', views.SendMessageView.as_view(), name='send_message'),
     path('advice/', views.JobAdviceView.as_view(), name='job_advice'),
     
     # Include router URLs
