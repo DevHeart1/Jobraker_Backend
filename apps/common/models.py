@@ -1,8 +1,13 @@
 from django.db import models
-from typing import List # Added this import
+from typing import List
+from django.conf import settings
 
-# For development, use JSONField to store embeddings as arrays
-# In production with PostgreSQL, this should be replaced with pgvector VectorField
+# Handle pgvector import gracefully
+try:
+    from pgvector.django import VectorField
+    PGVECTOR_AVAILABLE = True
+except ImportError:
+    PGVECTOR_AVAILABLE = False
 
 class VectorDocument(models.Model):
     """
@@ -12,12 +17,17 @@ class VectorDocument(models.Model):
     id = models.BigAutoField(primary_key=True)
     text_content = models.TextField(help_text="The actual text content that was embedded.")
 
-    # Store embedding as JSON array for SQLite compatibility
-    # In production PostgreSQL, replace with: VectorField(dimensions=1536)
-    embedding = models.JSONField(
-        default=list,
-        help_text="Vector embedding of the text_content (JSON array for development compatibility)."
-    )
+    # Use pgvector in production, JSONField for development
+    if PGVECTOR_AVAILABLE and not settings.DEBUG:
+        embedding = VectorField(
+            dimensions=1536,
+            help_text="Vector embedding of the text_content using pgvector."
+        )
+    else:
+        embedding = models.JSONField(
+            default=list,
+            help_text="Vector embedding of the text_content (JSON array for development compatibility)."
+        )
 
     source_type = models.CharField(
         max_length=50,
