@@ -28,6 +28,35 @@ class OpenAIJobAssistant:
         else:
             logger.warning("OpenAI API key not configured - using mock responses")
     
+    def generate_chat_completion(self, messages: List[Dict[str, str]]) -> str:
+        """
+        Generate a chat completion using OpenAI API.
+        
+        Args:
+            messages: List of messages in OpenAI format
+        
+        Returns:
+            The AI assistant's response text
+        """
+        if not self.api_key:
+            return "I'm sorry, but I'm not properly configured to provide responses right now. Please check the OpenAI API configuration."
+        
+        try:
+            client = openai.OpenAI(api_key=self.api_key)
+            
+            response = client.chat.completions.create(
+                model=self.model,
+                messages=messages,
+                max_tokens=1500,
+                temperature=0.7
+            )
+            
+            return response.choices[0].message.content
+            
+        except Exception as e:
+            logger.error(f"Error generating chat completion: {e}")
+            return "I'm sorry, but I encountered an error while processing your request. Please try again."
+
     def get_job_advice(
         self, 
         user_id: int, 

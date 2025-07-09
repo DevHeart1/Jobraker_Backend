@@ -48,7 +48,7 @@ class SendMessageView(APIView):
         """
         Send a message to the AI assistant and get a response.
         """
-        from apps.integrations.services.openai_service import OpenAIService
+        from apps.integrations.services.openai_service import OpenAIJobAssistant
         
         serializer = SendMessageSerializer(data=request.data)
         if not serializer.is_valid():
@@ -92,7 +92,7 @@ class SendMessageView(APIView):
                 })
             
             # Generate AI response
-            openai_service = OpenAIService()
+            openai_service = OpenAIJobAssistant()
             
             # Create system message for job search context
             system_message = """You are a helpful AI assistant specialized in job search and career advice. 
