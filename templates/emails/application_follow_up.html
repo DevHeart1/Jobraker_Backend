@@ -1,0 +1,72 @@
+{% extends "emails/base.html" %}
+
+{% block content %}
+<h2>Application Follow-up Reminder</h2>
+
+<p>Hello {{ user.first_name|default:user.email }},</p>
+
+<p>We wanted to follow up on your application for the following position:</p>
+
+<div class="job-card">
+    <div class="job-title">{{ job.title }}</div>
+    <div class="job-company">{{ job.company }}</div>
+    <div class="job-details">
+        {% if job.location %}📍 {{ job.location }}{% endif %}
+        {% if job.salary_min and job.salary_max %}💰 ${{ job.salary_min|floatformat:0 }} - ${{ job.salary_max|floatformat:0 }}{% endif %}
+    </div>
+</div>
+
+<div class="alert-box">
+    <strong>Application Status:</strong> {{ application.status|title }}<br>
+    <strong>Applied:</strong> {{ application.applied_at|date:"F j, Y" }}<br>
+    <strong>Days since application:</strong> {{ days_since_application }} days
+</div>
+
+<h3>Next Steps:</h3>
+
+<p>
+    While you wait for a response, here are some things you can do:
+</p>
+
+<ul>
+    <li>📧 <strong>Follow up with the hiring manager</strong> if it's been more than 2 weeks</li>
+    <li>🔍 <strong>Continue your job search</strong> - don't put all your eggs in one basket</li>
+    <li>📝 <strong>Update your application materials</strong> based on what you've learned</li>
+    <li>💼 <strong>Network with employees</strong> at the company through LinkedIn</li>
+</ul>
+
+<p>
+    <a href="{{ application_url }}" class="button">View Application Details</a>
+</p>
+
+<h3>Keep Searching:</h3>
+
+<p>
+    Don't stop your job search! We have more opportunities that might be perfect for you:
+</p>
+
+<p>
+    <a href="{{ site_url }}/jobs" class="button">Browse More Jobs</a>
+    <a href="{{ site_url }}/recommendations" class="button">View Recommendations</a>
+</p>
+
+<p>
+    <strong>Need help with your job search?</strong><br>
+    Our career resources can help you improve your applications and interview skills:
+</p>
+
+<ul>
+    <li>📚 <a href="{{ site_url }}/resources/resume-tips">Resume writing tips</a></li>
+    <li>🎯 <a href="{{ site_url }}/resources/interview-prep">Interview preparation guide</a></li>
+    <li>📞 <a href="{{ site_url }}/resources/follow-up">Follow-up email templates</a></li>
+</ul>
+
+<p>
+    Best of luck with your application!
+</p>
+
+<p>
+    Best regards,<br>
+    The {{ company_name }} Team
+</p>
+{% endblock %}

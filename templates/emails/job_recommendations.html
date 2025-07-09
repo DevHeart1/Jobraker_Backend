@@ -1,0 +1,66 @@
+{% extends "emails/base.html" %}
+
+{% block content %}
+<h2>New Job Recommendations</h2>
+
+<p>Hello {{ user.first_name|default:user.email }},</p>
+
+<p>Based on your profile and preferences, we found {{ total_recommendations }} new job recommendations that might interest you!</p>
+
+<div class="success-box">
+    <strong>🎯 Personalized Recommendations</strong><br>
+    These jobs were selected using AI analysis of your skills, experience, and preferences.
+</div>
+
+<h3>Top Recommendations:</h3>
+
+{% for job in recommended_jobs %}
+<div class="job-card">
+    <div class="job-title">{{ job.title }}</div>
+    <div class="job-company">{{ job.company }}</div>
+    <div class="job-details">
+        {% if job.location %}📍 {{ job.location }}{% endif %}
+        {% if job.salary_min and job.salary_max %}💰 ${{ job.salary_min|floatformat:0 }} - ${{ job.salary_max|floatformat:0 }}{% endif %}
+        {% if job.job_type %}🕒 {{ job.job_type }}{% endif %}
+    </div>
+    <p>{{ job.description|truncatewords:30 }}</p>
+    
+    {% if job.similarity_score %}
+    <div style="margin: 10px 0;">
+        <strong>Match Score:</strong> 
+        <span style="color: #16a34a; font-weight: 600;">{{ job.similarity_score|floatformat:1 }}%</span>
+    </div>
+    {% endif %}
+    
+    <a href="{{ site_url }}/jobs/{{ job.id }}" class="button">View Job</a>
+</div>
+{% endfor %}
+
+{% if total_recommendations > recommended_jobs|length %}
+<p>
+    <a href="{{ recommendations_url }}" class="button">View All {{ total_recommendations }} Recommendations</a>
+</p>
+{% endif %}
+
+<h3>Improve Your Recommendations:</h3>
+
+<p>
+    Get even better job matches by:
+</p>
+
+<ul>
+    <li>📝 <a href="{{ site_url }}/profile">Updating your profile</a> with more details</li>
+    <li>📄 <a href="{{ site_url }}/resume/upload">Uploading your latest resume</a></li>
+    <li>⚙️ <a href="{{ site_url }}/preferences">Adjusting your job preferences</a></li>
+</ul>
+
+<p>
+    <strong>Want to change how often you receive these emails?</strong><br>
+    <a href="{{ site_url }}/notifications" style="color: #2563eb;">Manage your notification preferences</a>
+</p>
+
+<p>
+    Best regards,<br>
+    The {{ company_name }} Team
+</p>
+{% endblock %}

@@ -1,0 +1,79 @@
+{% extends "emails/base.html" %}
+
+{% block content %}
+<h2>Application Status Update</h2>
+
+<p>Hello {{ user.first_name|default:user.email }},</p>
+
+<p>Your application status has been updated for the following position:</p>
+
+<div class="job-card">
+    <div class="job-title">{{ job.title }}</div>
+    <div class="job-company">{{ job.company }}</div>
+    <div class="job-details">
+        {% if job.location %}📍 {{ job.location }}{% endif %}
+        {% if job.salary_min and job.salary_max %}💰 ${{ job.salary_min|floatformat:0 }} - ${{ job.salary_max|floatformat:0 }}{% endif %}
+    </div>
+</div>
+
+{% if application.status == 'submitted' %}
+<div class="success-box">
+    <strong>✅ Application Submitted</strong><br>
+    {{ status_message }}
+</div>
+{% elif application.status == 'under_review' %}
+<div class="alert-box">
+    <strong>👀 Under Review</strong><br>
+    {{ status_message }}
+</div>
+{% elif application.status == 'interview_scheduled' %}
+<div class="success-box">
+    <strong>🎉 Interview Scheduled</strong><br>
+    {{ status_message }}
+</div>
+{% elif application.status == 'interview_completed' %}
+<div class="alert-box">
+    <strong>✅ Interview Completed</strong><br>
+    {{ status_message }}
+</div>
+{% elif application.status == 'offer_extended' %}
+<div class="success-box">
+    <strong>🎉 Job Offer Extended</strong><br>
+    {{ status_message }}
+</div>
+{% elif application.status == 'hired' %}
+<div class="success-box">
+    <strong>🎉 Congratulations! You're Hired!</strong><br>
+    {{ status_message }}
+</div>
+{% elif application.status == 'rejected' %}
+<div class="warning-box">
+    <strong>❌ Application Not Selected</strong><br>
+    {{ status_message }}
+</div>
+{% else %}
+<div class="alert-box">
+    <strong>Status Update</strong><br>
+    {{ status_message }}
+</div>
+{% endif %}
+
+<p>
+    <strong>Application Details:</strong><br>
+    Applied on: {{ application.applied_at|date:"F j, Y" }}<br>
+    Status changed from: {{ old_status|title }} → {{ application.status|title }}
+</p>
+
+<p>
+    <a href="{{ application_url }}" class="button">View Application Details</a>
+</p>
+
+<p>
+    <a href="{{ site_url }}/jobs" style="color: #2563eb;">Browse more job opportunities</a>
+</p>
+
+<p>
+    Best regards,<br>
+    The {{ company_name }} Team
+</p>
+{% endblock %}

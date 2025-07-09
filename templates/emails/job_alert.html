@@ -1,0 +1,50 @@
+{% extends "emails/base.html" %}
+
+{% block content %}
+<h2>New Job Alert: {{ total_jobs }} matching jobs found</h2>
+
+<p>Hello {{ user.first_name|default:user.email }},</p>
+
+<p>We found {{ total_jobs }} new jobs that match your alert criteria for "<strong>{{ alert.title }}</strong>".</p>
+
+<div class="alert-box">
+    <strong>Alert Details:</strong><br>
+    <strong>Title:</strong> {{ alert.title }}<br>
+    <strong>Location:</strong> {{ alert.location|default:"Any location" }}<br>
+    <strong>Job Type:</strong> {{ alert.job_type|default:"Any type" }}<br>
+    <strong>Salary Range:</strong> {{ alert.salary_min|default:"Any" }} - {{ alert.salary_max|default:"Any" }}
+</div>
+
+<h3>Top Matching Jobs:</h3>
+
+{% for job in jobs %}
+<div class="job-card">
+    <div class="job-title">{{ job.title }}</div>
+    <div class="job-company">{{ job.company }}</div>
+    <div class="job-details">
+        {% if job.location %}📍 {{ job.location }}{% endif %}
+        {% if job.salary_min and job.salary_max %}💰 ${{ job.salary_min|floatformat:0 }} - ${{ job.salary_max|floatformat:0 }}{% endif %}
+        {% if job.job_type %}🕒 {{ job.job_type }}{% endif %}
+    </div>
+    <p>{{ job.description|truncatewords:30 }}</p>
+    <a href="{{ site_url }}/jobs/{{ job.id }}" class="button">View Job</a>
+</div>
+{% endfor %}
+
+{% if total_jobs > jobs|length %}
+<p>
+    <a href="{{ view_more_url }}" class="button">View All {{ total_jobs }} Jobs</a>
+</p>
+{% endif %}
+
+<p>
+    <strong>Manage your job alerts:</strong><br>
+    <a href="{{ site_url }}/alerts" style="color: #2563eb;">Update alert preferences</a> |
+    <a href="{{ site_url }}/alerts/{{ alert.id }}/unsubscribe" style="color: #dc2626;">Unsubscribe from this alert</a>
+</p>
+
+<p>
+    Best regards,<br>
+    The {{ company_name }} Team
+</p>
+{% endblock %}

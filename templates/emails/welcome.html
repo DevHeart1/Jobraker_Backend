@@ -1,0 +1,61 @@
+{% extends "emails/base.html" %}
+
+{% block content %}
+<h2>Welcome to {{ company_name }}!</h2>
+
+<p>Hello {{ user.first_name|default:user.email }},</p>
+
+<p>Welcome to {{ company_name }}! We're excited to have you join our platform and help you find your next great opportunity.</p>
+
+<div class="success-box">
+    <strong>Your account has been successfully created!</strong><br>
+    You can now start exploring job opportunities and building your profile.
+</div>
+
+<h3>Get Started:</h3>
+
+<p>
+    <strong>1. Complete your profile:</strong><br>
+    Add your skills, experience, and preferences to get better job matches.<br>
+    <a href="{{ profile_url }}" class="button">Complete Profile</a>
+</p>
+
+<p>
+    <strong>2. Set up job alerts:</strong><br>
+    Get notified when new jobs matching your criteria are posted.<br>
+    <a href="{{ site_url }}/alerts/create" class="button">Create Job Alert</a>
+</p>
+
+<p>
+    <strong>3. Browse opportunities:</strong><br>
+    Explore thousands of job opportunities from top companies.<br>
+    <a href="{{ site_url }}/jobs" class="button">Browse Jobs</a>
+</p>
+
+<p>
+    <strong>4. Upload your resume:</strong><br>
+    Let our AI analyze your resume and suggest the best matches.<br>
+    <a href="{{ site_url }}/resume/upload" class="button">Upload Resume</a>
+</p>
+
+<h3>Need Help?</h3>
+
+<p>
+    If you have any questions or need assistance, our support team is here to help:
+</p>
+
+<ul>
+    <li>📧 Email us at <a href="mailto:{{ support_email }}">{{ support_email }}</a></li>
+    <li>💬 Use our chat support on the website</li>
+    <li>📚 Check out our <a href="{{ site_url }}/help">Help Center</a></li>
+</ul>
+
+<p>
+    We're here to help you succeed in your job search!
+</p>
+
+<p>
+    Best regards,<br>
+    The {{ company_name }} Team
+</p>
+{% endblock %}

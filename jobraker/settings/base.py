@@ -221,6 +221,35 @@ PINECONE_INDEX_METRIC = os.getenv('PINECONE_INDEX_METRIC', 'cosine') # Default m
 CORS_ALLOWED_ORIGINS = os.getenv('CORS_ALLOWED_ORIGINS', '').split(',') if os.getenv('CORS_ALLOWED_ORIGINS') else []
 CORS_ALLOW_CREDENTIALS = True
 
+# Email Configuration
+EMAIL_BACKEND = os.getenv('EMAIL_BACKEND', 'django.core.mail.backends.smtp.EmailBackend')
+EMAIL_HOST = os.getenv('EMAIL_HOST', 'smtp.gmail.com')
+EMAIL_PORT = int(os.getenv('EMAIL_PORT', '587'))
+EMAIL_USE_TLS = os.getenv('EMAIL_USE_TLS', 'True').lower() == 'true'
+EMAIL_USE_SSL = os.getenv('EMAIL_USE_SSL', 'False').lower() == 'true'
+EMAIL_HOST_USER = os.getenv('EMAIL_HOST_USER', '')
+EMAIL_HOST_PASSWORD = os.getenv('EMAIL_HOST_PASSWORD', '')
+
+# Email settings
+DEFAULT_FROM_EMAIL = os.getenv('DEFAULT_FROM_EMAIL', 'noreply@jobraker.com')
+SERVER_EMAIL = os.getenv('SERVER_EMAIL', DEFAULT_FROM_EMAIL)
+ADMINS = [
+    ('Admin', os.getenv('ADMIN_EMAIL', 'admin@jobraker.com')),
+]
+MANAGERS = ADMINS
+
+# Application specific email settings
+COMPANY_NAME = os.getenv('COMPANY_NAME', 'Jobraker')
+SITE_URL = os.getenv('SITE_URL', 'https://jobraker.com')
+SUPPORT_EMAIL = os.getenv('SUPPORT_EMAIL', 'support@jobraker.com')
+
+# Email timeout settings
+EMAIL_TIMEOUT = int(os.getenv('EMAIL_TIMEOUT', '10'))
+
+# Email retry settings for failed sends
+EMAIL_RETRY_ATTEMPTS = int(os.getenv('EMAIL_RETRY_ATTEMPTS', '3'))
+EMAIL_RETRY_DELAY = int(os.getenv('EMAIL_RETRY_DELAY', '60'))  # seconds
+
 # Jazzmin Admin Configuration
 JAZZMIN_SETTINGS = {
     'site_title': 'Jobraker Admin',
