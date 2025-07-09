@@ -60,6 +60,18 @@ app.conf.beat_schedule = {
         'task': 'apps.jobs.tasks.send_application_follow_up_reminders',
         'schedule': crontab(hour=8, minute=0),  # Run daily at 8:00 AM UTC
     },
+    'sync-unprocessed-jobs': {
+        'task': 'apps.integrations.tasks_enhanced.sync_unprocessed_jobs',
+        'schedule': 3600.0,  # Run every hour
+    },
+    'cleanup-old-embeddings': {
+        'task': 'apps.integrations.tasks_enhanced.cleanup_old_embeddings',
+        'schedule': crontab(hour=2, minute=0),  # Run daily at 2:00 AM UTC
+    },
+    'reindex-vector-database': {
+        'task': 'apps.integrations.tasks_enhanced.reindex_vector_database',
+        'schedule': crontab(hour=3, minute=0, day_of_week=1),  # Run weekly on Monday at 3:00 AM UTC
+    },
 }
 
 @app.task(bind=True)

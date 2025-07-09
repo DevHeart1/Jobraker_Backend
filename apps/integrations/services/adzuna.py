@@ -507,8 +507,8 @@ class AdzunaJobProcessor:
             
             # Queue job for embedding generation if not already processed
             if not existing_job.processed_for_matching:
-                from apps.integrations.tasks import generate_job_embeddings_and_ingest_for_rag
-                generate_job_embeddings_and_ingest_for_rag.delay(str(existing_job.id))
+                from apps.integrations.tasks_enhanced import process_job_for_embeddings
+                process_job_for_embeddings.delay(str(existing_job.id))
             
             return 'updated'
         else:
@@ -518,8 +518,8 @@ class AdzunaJobProcessor:
             ADZUNA_JOBS_PROCESSED_TOTAL.labels(country=country_label, status='created').inc()
             
             # Queue job for embedding generation
-            from apps.integrations.tasks import generate_job_embeddings_and_ingest_for_rag
-            generate_job_embeddings_and_ingest_for_rag.delay(str(new_job.id))
+            from apps.integrations.tasks_enhanced import process_job_for_embeddings
+            process_job_for_embeddings.delay(str(new_job.id))
             
             return 'created'
     
