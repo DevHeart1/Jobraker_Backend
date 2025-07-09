@@ -13,20 +13,27 @@ logger = logging.getLogger(__name__)
 User = get_user_model()
 
 
-class OpenAIJobAssistant:
+class OpenAIService:
     """
-    AI-powered job assistance using OpenAI GPT.
-    Provides job advice, resume optimization, and career guidance.
+    OpenAI service for embeddings, chat completions, and AI-powered features.
     """
     
     def __init__(self):
         self.api_key = getattr(settings, 'OPENAI_API_KEY', '')
-        self.model = getattr(settings, 'OPENAI_MODEL', 'gpt-4')
+        self.model = getattr(settings, 'OPENAI_MODEL', 'gpt-4o-mini')
+        self.embedding_model = getattr(settings, 'OPENAI_EMBEDDING_MODEL', 'text-embedding-3-small')
         
         if self.api_key:
             openai.api_key = self.api_key
         else:
             logger.warning("OpenAI API key not configured - using mock responses")
+
+
+class OpenAIJobAssistant(OpenAIService):
+    """
+    AI-powered job assistance using OpenAI GPT.
+    Provides job advice, resume optimization, and career guidance.
+    """
     
     def generate_chat_completion(self, messages: List[Dict[str, str]]) -> str:
         """
@@ -165,6 +172,59 @@ class OpenAIJobAssistant:
         except Exception as e:
             logger.error(f"Failed to queue get_openai_chat_response_task for user {user_id}, session {session_id}: {e}")
             return {'status': 'error', 'message': 'Failed to queue chat task.'}
+
+    def generate_chat_response(self, messages: List[Dict[str, str]], user: User) -> str:
+        """
+        Generate a chat response for the user based on conversation history.
+        
+        Args:
+            messages: List of previous messages in the conversation
+            user: The user requesting the response
+            
+        Returns:
+            AI assistant's response
+        """
+        if not self.api_key:
+            return "I'm sorry, but I'm not properly configured to provide responses right now. Please check the OpenAI API configuration."
+        
+        try:
+            # Build conversation context
+            system_message = {
+                "role": "system",
+                "content": f"""You are a helpful job search assistant for {user.first_name or user.email}. 
+                You help users with job searching, resume optimization, interview preparation, and career advice.
+                
+                Be friendly, professional, and provide actionable advice. If asked about specific jobs, 
+                you can suggest they search on the platform. Keep responses concise but helpful.
+                
+                User context:
+                - Name: {user.first_name} {user.last_name}
+                - Email: {user.email}
+                """
+            }
+            
+            # Convert messages to OpenAI format
+            formatted_messages = [system_message]
+            for msg in messages:
+                formatted_messages.append({
+                    "role": "user" if msg['sender'] == 'user' else "assistant",
+                    "content": msg['content']
+                })
+            
+            client = openai.OpenAI(api_key=self.api_key)
+            
+            response = client.chat.completions.create(
+                model=self.model,
+                messages=formatted_messages,
+                max_tokens=800,
+                temperature=0.7
+            )
+            
+            return response.choices[0].message.content.strip()
+            
+        except Exception as e:
+            logger.error(f"Error generating chat response: {e}")
+            return "I'm sorry, I encountered an error while processing your request. Please try again."
 
     def _moderate_text(self, text_to_moderate: str) -> bool:
         """

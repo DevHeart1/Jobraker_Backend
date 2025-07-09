@@ -41,6 +41,7 @@ THIRD_PARTY_APPS = [
     'django_celery_beat',
     'django_celery_results',
     'django_elasticsearch_dsl', # Added for Elasticsearch
+    'channels',  # WebSocket support
 ]
 
 LOCAL_APPS = [
@@ -88,6 +89,9 @@ TEMPLATES = [
 ]
 
 WSGI_APPLICATION = 'jobraker.wsgi.application'
+
+# ASGI Configuration (for Channels)
+ASGI_APPLICATION = 'jobraker.asgi.application'
 
 # Database
 DATABASES = {
@@ -195,6 +199,16 @@ CELERY_ACCEPT_CONTENT = ['json']
 CELERY_TASK_SERIALIZER = 'json'
 CELERY_RESULT_SERIALIZER = 'json'
 CELERY_TIMEZONE = TIME_ZONE
+
+# WebSocket Configuration (Django Channels)
+CHANNEL_LAYERS = {
+    'default': {
+        'BACKEND': 'channels_redis.core.RedisChannelLayer',
+        'CONFIG': {
+            "hosts": [os.getenv('REDIS_URL', 'redis://localhost:6379/0')],
+        },
+    },
+}
 
 # External API Configuration
 OPENAI_API_KEY = os.getenv('OPENAI_API_KEY', '')
