@@ -544,7 +544,7 @@ def get_openai_job_advice_task(self, user_id: int, advice_type: str, context: st
         text_for_rag_embedding = query_for_rag if query_for_rag else context
         if text_for_rag_embedding:
             try:
-                from apps.integrations.services.openai import EmbeddingService  # Consolidated
+                from apps.integrations.services.openai_service import EmbeddingService
                 from apps.common.services import VectorDBService
 
                 embedding_service = EmbeddingService()
@@ -556,9 +556,9 @@ def get_openai_job_advice_task(self, user_id: int, advice_type: str, context: st
 
                     rag_filter = None
                     if advice_type == "salary":
-                        rag_filter = {'source_type__in': ['job_listing', 'salary_data_article']} # Example source types
+                        rag_filter = {"source_type": {"$in": ['job_listing', 'salary_data_article']}} # Example source types
                     elif advice_type in ["resume", "interview", "application", "skills", "networking"]:
-                        rag_filter = {'source_type__in': ['career_article', 'faq_item']} # Example source types
+                        rag_filter = {"source_type": {"$in": ['knowledge_article', 'faq_item']}} # Example source types
 
                     logger.info(f"RAG: Searching documents for advice_type '{advice_type}' with filter: {rag_filter}")
                     similar_docs = vdb_service.search_similar_documents(
@@ -570,18 +570,14 @@ def get_openai_job_advice_task(self, user_id: int, advice_type: str, context: st
                     if similar_docs:
                         rag_context_parts = ["--- Start of Retrieved Information ---"]
                         for i, doc in enumerate(similar_docs):
-                            doc_info = (
-                                f"Retrieved Document {i+1} "
-                                f"(Source Type: {doc.get('source_type', 'N/A')}, "
-                                f"Source ID: {doc.get('source_id', 'N/A')}, " # Useful for debugging/tracing
-                                f"Similarity: {doc.get('similarity_score', 0.0):.3f}):" # Display score
-                            )
-                            rag_context_parts.append(f"{doc_info}\n{doc.get('text_content', '')}")
+                            content = doc.get('text_content', 'No content available.')
+                            source = doc.get('metadata', {}).get('source_type', 'unknown source')
+                            rag_context_parts.append(f"Source {i+1} ({source}):\n{content}\n")
                         rag_context_parts.append("--- End of Retrieved Information ---")
-                        rag_context_str = "\n\n".join(rag_context_parts)
-                        logger.info(f"RAG: Retrieved and formatted {len(similar_docs)} documents for advice task.")
+                        rag_context_str = "\n".join(rag_context_parts)
+                        logger.info(f"RAG: Found {len(similar_docs)} documents for advice task.")
                     else:
-                        logger.info("RAG: No similar documents found for advice task.")
+                        logger.info(f"RAG: No relevant documents found for advice task: {advice_type}")
                 else:
                     logger.warning("RAG: Could not generate query embedding for advice task.")
             except Exception as e:
