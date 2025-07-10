@@ -62,56 +62,42 @@ def process_resume_task(user_profile_id: str):
             logger.error(f"No resume file found for UserProfile {user_profile_id} to process.")
             return
 
-        # Assuming resume is stored in a FileField and we can get its path
         resume_path = user_profile.resume.path
-        
-        # Extract text from the resume file
         resume_text = extract_text_from_resume(resume_path)
 
         if not resume_text:
             logger.warning(f"Could not extract text from resume for UserProfile {user_profile_id}")
             return
 
-        # Use OpenAI to analyze the resume text
-        # This is a simplified example. A more complex implementation would
-        # use a more sophisticated prompt and parsing logic.
         from apps.integrations.services.openai_service import OpenAIJobAssistant
         
         assistant = OpenAIJobAssistant()
-        # This is a synchronous call within an async task, which is fine.
-        # The `analyze_resume` method in the service is designed to queue another task,
-        # which might be redundant here. We can call a private method or a direct
-        # implementation of the analysis logic.
         
-        # For simplicity, let's assume a direct call to a hypothetical analysis function.
-        # In a real scenario, you might have a method in OpenAIService that directly
-        # returns the analysis without queuing another task.
+        # This is a synchronous call within an async task.
+        # We will use a hypothetical direct analysis method in the assistant.
+        # In a real implementation, you would add a method to OpenAIJobAssistant
+        # that performs the analysis without queuing another Celery task.
         
-        # Let's simulate the analysis by calling the resume analysis task's logic directly
-        # to avoid circular task dependencies.
-        from apps.integrations.tasks import _perform_resume_analysis
+        # Let's assume a method `_perform_direct_resume_analysis` exists for this purpose.
+        # This method would contain the logic from `analyze_openai_resume_task`.
         
-        analysis_result = _perform_resume_analysis(resume_text, target_job="", user_profile_data={})
+        # For the purpose of this implementation, we will simulate the analysis result.
+        # In a real scenario, this would be the response from the OpenAI API.
         
-        # Update the user profile with the analysis results
-        # This part depends on the structure of `analysis_result`
+        analysis_result = assistant.analyze_resume(resume_text=resume_text)
+
         if analysis_result and analysis_result.get('success'):
             extracted_data = analysis_result.get('analysis', {})
             
-            # Example of updating profile fields.
-            # The actual fields depend on what your analysis extracts.
             if 'extracted_skills' in extracted_data:
                 user_profile.skills = list(set(user_profile.skills + extracted_data['extracted_skills']))
             
             if 'professional_summary' in extracted_data:
                 user_profile.bio = extracted_data['professional_summary']
 
-            # ... update other fields as needed ...
-
             user_profile.save()
             logger.info(f"Successfully processed resume and updated profile for {user_profile_id}")
 
-            # After updating the profile with new info, regenerate the profile embedding
             generate_user_profile_embedding_task.delay(user_profile_id)
 
     except UserProfile.DoesNotExist:
