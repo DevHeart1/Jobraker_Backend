@@ -265,3 +265,47 @@ class EmailService:
         
         logger.info(f"Bulk notification sent: {results}")
         return results
+    
+    def send_test_email(self, recipient_email: str) -> bool:
+        """
+        Send a test email for health check purposes.
+        
+        Args:
+            recipient_email: Test recipient email address
+            
+        Returns:
+            True if test email was sent successfully, False otherwise
+        """
+        try:
+            context = {
+                'company_name': self.company_name,
+                'site_url': getattr(settings, 'SITE_URL', 'http://localhost:8000'),
+                'user': {'email': recipient_email}
+            }
+            
+            return self.send_email(
+                subject="Jobraker Communication System Test",
+                template_name='welcome',  # Use welcome template for test
+                context=context,
+                recipient_list=[recipient_email]
+            )
+        except Exception as e:
+            logger.error(f"Test email failed: {str(e)}")
+            return False
+    
+    def _load_template(self, template_name: str, context: Dict[str, Any]) -> str:
+        """
+        Load and render an email template.
+        
+        Args:
+            template_name: Template name (e.g., 'welcome.html')
+            context: Template context variables
+            
+        Returns:
+            Rendered HTML content
+        """
+        try:
+            return render_to_string(f'emails/{template_name}', context)
+        except Exception as e:
+            logger.error(f"Template loading failed for {template_name}: {str(e)}")
+            raise
