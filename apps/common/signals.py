@@ -48,32 +48,8 @@ def knowledge_article_post_delete(sender, instance: KnowledgeArticle, **kwargs):
     No separate action needed for post_delete if making it inactive first is the standard workflow.
     However, if a direct delete of an active article should clean RAG, we'd add:
     """
-    # from apps.common.services import VectorDBService
-    # logger.info(f"KnowledgeArticle post_delete signal triggered for article ID: {instance.id}. Type: {instance.source_type}")
-    # vector_db_service = VectorDBService()
-    # success = vector_db_service.delete_documents(source_type=instance.source_type, source_id=str(instance.id))
-    # if success:
-    #     logger.info(f"Successfully deleted documents from RAG for deleted KnowledgeArticle ID: {instance.id}")
-    # else:
-    #     logger.error(f"Failed to delete documents from RAG for deleted KnowledgeArticle ID: {instance.id}")
-    # For now, relying on the save signal and making articles inactive before deletion.
-    # If an active article is hard-deleted, its RAG entry might remain if not handled explicitly.
-    # The current `process_knowledge_article_for_rag_task` will attempt to fetch it, fail, and do nothing to RAG.
-    # This is a potential inconsistency.
-    # A better post_delete would be to directly call vector_db_service.delete_documents.
-
-    logger.info(f"KnowledgeArticle (ID: {instance.id}, Title: {instance.title}) was deleted. "
-                f"If it was active, its RAG entry should be manually verified or a dedicated "
-                f"RAG cleanup task for deletions should be implemented if not handled by setting is_active=False first.")
-    # For a robust system, let's trigger a delete from RAG store
-    try:
-        from apps.common.services import VectorDBService
-        vector_db_service = VectorDBService()
-        # We use instance.source_type and instance.id as they are available from the instance being deleted
-        deleted_from_rag = vector_db_service.delete_documents(source_type=instance.source_type, source_id=str(instance.id))
-        if deleted_from_rag:
-            logger.info(f"Successfully triggered deletion from RAG for KnowledgeArticle ID: {instance.id}")
-        else:
-            logger.warning(f"Deletion from RAG for KnowledgeArticle ID: {instance.id} reported failure or no action by service.")
-    except Exception as e:
-        logger.error(f"Error trying to delete KnowledgeArticle ID: {instance.id} from RAG on post_delete: {e}")
+    logger.info(f"KnowledgeArticle post_delete signal triggered for article ID: {instance.id}")
+    # The updated task now handles DoesNotExist gracefully by deleting from the vector store.
+    # This ensures that even if an active article is deleted directly, it gets cleaned up from RAG.
+    process_knowledge_article_for_rag_task.delay(instance.id)
+    logger.info(f"Queued RAG cleanup task for deleted KnowledgeArticle ID: {instance.id}")

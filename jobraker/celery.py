@@ -58,6 +58,10 @@ app.conf.beat_schedule = {
         'task': 'apps.integrations.tasks.fetch_adzuna_jobs',
         'schedule': crontab(hour='*/4'),  # Run every 4 hours
     },
+    'check-stale-skyvern-applications': {
+        'task': 'apps.integrations.tasks.check_stale_skyvern_applications',
+        'schedule': crontab(hour='*/2'), # Run every 2 hours to catch stuck applications
+    },
     'batch-generate-job-embeddings': {
         'task': 'apps.integrations.tasks.batch_generate_job_embeddings',
         'schedule': crontab(hour='*/2'),  # Run every 2 hours
@@ -67,52 +71,28 @@ app.conf.beat_schedule = {
         'schedule': crontab(hour=1, minute=0),  # Run daily at 1:00 AM UTC
     },
     
-    # === NOTIFICATION AND COMMUNICATION TASKS ===
-    'process-daily-job-alerts': {
-        'task': 'apps.notifications.tasks.process_daily_job_alerts',
-        'schedule': crontab(hour=9, minute=0),  # Run daily at 9:00 AM UTC
+    # === NOTIFICATION AND USER-FACING TASKS ===
+    'send-daily-job-recommendations': {
+        'task': 'apps.notifications.tasks.send_daily_job_recommendations_task',
+        'schedule': crontab(hour=9, minute=0),  # Daily at 9:00 AM UTC
     },
-    'process-weekly-job-alerts': {
-        'task': 'apps.notifications.tasks.process_weekly_job_alerts',
-        'schedule': crontab(hour=9, minute=0, day_of_week=1),  # Run weekly on Monday at 9:00 AM UTC
+    'send-weekly-activity-summary': {
+        'task': 'apps.notifications.tasks.send_weekly_activity_summary_task',
+        'schedule': crontab(hour=10, minute=0, day_of_week='saturday'), # Weekly on Saturday at 10:00 AM UTC
     },
-    'send-weekly-job-recommendations': {
-        'task': 'apps.notifications.tasks.send_weekly_job_recommendations',
-        'schedule': crontab(hour=10, minute=0, day_of_week=1),  # Run weekly on Monday at 10:00 AM UTC
+
+    # === DATA & SYSTEM HEALTH TASKS ===
+    'clean-up-old-job-listings': {
+        'task': 'apps.jobs.tasks.clean_up_old_job_listings_task',
+        'schedule': crontab(hour=3, minute=0, day_of_week=0), # Weekly on Sunday at 3:00 AM UTC
     },
-    'send-application-follow-up-reminders': {
-        'task': 'apps.notifications.tasks.send_application_follow_up_reminders',
-        'schedule': crontab(hour=11, minute=0),  # Run daily at 11:00 AM UTC
+    'rebuild-embedding-index': {
+        'task': 'apps.integrations.tasks.rebuild_embedding_index_task',
+        'schedule': crontab(hour=4, minute=0, day_of_week=0), # Weekly on Sunday at 4:00 AM UTC
     },
-    
-    # === LEGACY/OPTIONAL TASKS ===
-    'auto-apply-jobs': {
-        'task': 'apps.jobs.tasks.auto_apply_matching_jobs',
-        'schedule': 1800.0,  # Run every 30 minutes (if implemented)
-    },
-    'cleanup-old-notifications': {
-        'task': 'apps.notifications.tasks.cleanup_old_notifications',
-        'schedule': crontab(hour=0, minute=0),  # Run daily at midnight
-    },
-    'batch-generate-recommendations': {
-        'task': 'apps.jobs.tasks.batch_generate_recommendations_for_active_users_task',
-        'schedule': crontab(hour=12, minute=0),  # Run daily at noon (if implemented)
-    },
-    'process-job-alerts': {
-        'task': 'apps.jobs.tasks.process_job_alerts_task',
-        'schedule': 1800.0,  # Run every 30 minutes (if implemented)
-    },
-    'sync-unprocessed-jobs': {
-        'task': 'apps.integrations.tasks_enhanced.sync_unprocessed_jobs',
-        'schedule': 3600.0,  # Run every hour (if implemented)
-    },
-    'cleanup-old-embeddings': {
-        'task': 'apps.integrations.tasks_enhanced.cleanup_old_embeddings',
-        'schedule': crontab(hour=3, minute=0),  # Run daily at 3:00 AM UTC (if implemented)
-    },
-    'reindex-vector-database': {
-        'task': 'apps.integrations.tasks_enhanced.reindex_vector_database',
-        'schedule': crontab(hour=4, minute=0, day_of_week=1),  # Run weekly on Monday at 4:00 AM UTC (if implemented)
+    'monitor-system-health': {
+        'task': 'apps.integrations.tasks.monitor_system_health_task',
+        'schedule': crontab(minute='*/15'), # Every 15 minutes
     },
 }
 
