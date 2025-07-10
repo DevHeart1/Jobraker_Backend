@@ -26,7 +26,7 @@ from apps.common.metrics import (
 @shared_task(bind=True, max_retries=3)
 def fetch_adzuna_jobs(self, categories=None, max_days_old=1):
     """
-    Fetch jobs from Adzuna API.
+    Fetch jobs from Adzuna API and automatically generate embeddings.
     
     Args:
         categories: List of job categories to search (optional)
@@ -45,6 +45,7 @@ def fetch_adzuna_jobs(self, categories=None, max_days_old=1):
                 'created': 0,
                 'updated': 0,
                 'errors': 0,
+                'embeddings_queued': 0,
             }
             
             for category in categories:
@@ -55,13 +56,28 @@ def fetch_adzuna_jobs(self, categories=None, max_days_old=1):
                 )
                 
                 for key in total_stats:
-                    total_stats[key] += stats[key]
+                    if key in stats:
+                        total_stats[key] += stats[key]
+                
+                # Queue embedding generation for new jobs
+                if 'new_job_ids' in stats:
+                    for job_id in stats['new_job_ids']:
+                        generate_job_embeddings_and_ingest_for_rag.delay(str(job_id))
+                        total_stats['embeddings_queued'] += 1
             
             logger.info(f"Adzuna fetch completed for categories {categories}: {total_stats}")
             return total_stats
         else:
             # Sync recent jobs across multiple categories
             stats = processor.sync_recent_jobs(days=max_days_old)
+            
+            # Queue embedding generation for new jobs
+            if 'new_job_ids' in stats:
+                stats['embeddings_queued'] = 0
+                for job_id in stats['new_job_ids']:
+                    generate_job_embeddings_and_ingest_for_rag.delay(str(job_id))
+                    stats['embeddings_queued'] += 1
+            
             logger.info(f"Adzuna sync completed: {stats}")
             return stats
             
@@ -780,7 +796,6 @@ def get_openai_chat_response_task(self, user_id: int, session_id: int, message: 
             # Even if flagged, we might want to save a placeholder or the flagged message with a note.
             # For now, let's follow the pattern of returning an error status.
             # The actual saving of a "flagged response" message is not done here yet.
-        # If AI output is flagged, we don't save it as a regular message.
             return {'response': "AI output violates content guidelines and was not saved.", 'model_used': 'moderation_filter', 'success': False, 'error': 'flagged_ai_output_not_saved'}
 
         # Save the AI message to the chat session (only if not flagged)
@@ -948,375 +963,411 @@ Please structure your feedback to include:
 # --- End Prometheus Metrics ---
 
 
-# --- Tasks for Skyvern API Integration ---
-@shared_task(bind=True, max_retries=3)
-def submit_skyvern_application_task(self, application_id: str, job_url: str, prompt_template: str, user_profile_data: Dict[str, Any], resume_base64: Optional[str] = None, cover_letter_base64: Optional[str] = None):
-    """
-    Submits a job application using Skyvern.
-    Args:
-        application_id: JobRaker internal application ID for tracking.
-        job_url: The URL of the job posting to apply to.
-        prompt_template: A template for the Skyvern prompt, e.g., "Apply to job at {job_url}..."
-        user_profile_data: Serialized user profile information.
-        resume_base64: Base64 encoded resume content.
-        cover_letter_base64: Base64 encoded cover letter content (optional).
-    """
-    from apps.integrations.services.skyvern import SkyvernAPIClient
-    from apps.jobs.models import Application # Now using the Application model
-
-    logger.info(f"Starting Skyvern application task for JobRaker app ID: {application_id}, Job URL: {job_url}")
-
-    try:
-        application = Application.objects.get(id=application_id)
-    except Application.DoesNotExist:
-        logger.error(f"Application {application_id} not found in submit_skyvern_application_task.")
-        # Increment a metric for this case if desired
-        SKYVERN_APPLICATION_SUBMISSIONS_TOTAL.labels(status='application_not_found').inc()
-        return {"status": "error", "application_id": application_id, "error": "Application not found"}
-
-    client = SkyvernAPIClient()
-
-    # Construct inputs for Skyvern
-    skyvern_inputs = {
-        "target_job_url": job_url,
-        "user_profile_data": user_profile_data,
-    }
-    if resume_base64:
-        skyvern_inputs["resume_base64"] = resume_base64
-    if cover_letter_base64:
-        skyvern_inputs["cover_letter_base64"] = cover_letter_base64
-
-    prompt = prompt_template.format(job_url=job_url) # Basic prompt formatting
-
-    # Potentially get webhook_url from settings or construct it
-    # webhook_url = getattr(settings, 'SKYVERN_WEBHOOK_URL', None)
-    webhook_url = None # Placeholder
-
-    try:
-        response = client.run_task(
-            prompt=prompt,
-            inputs=skyvern_inputs,
-            webhook_url=webhook_url
-        )
-
-        if response and response.get("task_id"):
-            skyvern_task_id = response["task_id"]
-            logger.info(f"Skyvern task created: {skyvern_task_id} for JobRaker app ID: {application_id}")
-
-            application.skyvern_task_id = skyvern_task_id
-            application.status = 'submitting_via_skyvern' # Using one of the new statuses
-            application.save(update_fields=['skyvern_task_id', 'status', 'updated_at'])
-
-            SKYVERN_APPLICATION_SUBMISSIONS_TOTAL.labels(status='initiated').inc()
-            return {"status": "success", "skyvern_task_id": skyvern_task_id, "application_id": application_id}
-        else:
-            logger.error(f"Skyvern task creation failed for JobRaker app ID: {application_id}. Response: {response}")
-            application.status = 'skyvern_submission_failed' # New status
-            application.skyvern_response_data = response # Store failure response if any
-            application.save(update_fields=['status', 'skyvern_response_data', 'updated_at'])
-            SKYVERN_APPLICATION_SUBMISSIONS_TOTAL.labels(status='creation_failed').inc()
-            return {"status": "failure", "application_id": application_id, "error": "Task creation failed", "response": response}
-
-    except Exception as exc:
-        logger.error(f"Error in submit_skyvern_application_task for app ID {application_id}: {exc}")
-        if 'application' in locals(): # Check if application object was fetched
-            application.status = 'skyvern_submission_failed' # Or a more generic error status
-            application.skyvern_response_data = {'error': str(exc)}
-            application.save(update_fields=['status', 'skyvern_response_data', 'updated_at'])
-        SKYVERN_APPLICATION_SUBMISSIONS_TOTAL.labels(status='task_exception').inc()
-        raise self.retry(exc=exc, countdown=60 * (2 ** self.request.retries))
-
-
-@shared_task(bind=True, max_retries=5, default_retry_delay=5 * 60) # Retry less frequently for status checks
-def check_skyvern_task_status_task(self, skyvern_task_id: str, application_id: str):
-    """
-    Checks the status of a Skyvern task and updates the JobRaker application.
-    Args:
-        skyvern_task_id: The task ID from Skyvern.
-        application_id: JobRaker internal application ID for tracking.
-    """
-    from apps.integrations.services.skyvern import SkyvernAPIClient
-    from apps.jobs.models import Application # Now using the Application model
-    from django.utils import timezone
-
-    logger.info(f"Checking Skyvern task status for task_id: {skyvern_task_id}, JobRaker app ID: {application_id}")
-
-    try:
-        application = Application.objects.get(id=application_id, skyvern_task_id=skyvern_task_id)
-    except Application.DoesNotExist:
-        logger.error(f"Application {application_id} with Skyvern task ID {skyvern_task_id} not found in check_skyvern_task_status_task.")
-        SKYVERN_APPLICATION_SUBMISSIONS_TOTAL.labels(status='check_app_not_found').inc()
-        # Do not retry if app not found, as it's a data integrity issue.
-        return {"status": "error", "application_id": application_id, "error": "Application for Skyvern task not found"}
-
-    client = SkyvernAPIClient()
-
-    try:
-        status_response = client.get_task_status(skyvern_task_id)
-
-        if not status_response:
-            logger.warning(f"Failed to get status for Skyvern task {skyvern_task_id}. Will retry.")
-            raise Exception(f"No response from Skyvern for task status {skyvern_task_id}") # Trigger retry
-
-        current_skyvern_status = status_response.get("status") # e.g., PENDING, RUNNING, COMPLETED, FAILED
-        logger.info(f"Skyvern task {skyvern_task_id} status: {current_skyvern_status}")
-
-        new_jobraker_status = application.status # Keep current status if no change
-        skyvern_message = status_response.get("message", "")
-
-        if current_skyvern_status == "COMPLETED":
-            new_jobraker_status = 'submitted' # Successfully submitted via Skyvern
-            application.applied_at = timezone.now() # Mark as applied now
-            SKYVERN_APPLICATION_SUBMISSIONS_TOTAL.labels(status='completed_success').inc()
-            # Trigger results fetching task
-            retrieve_skyvern_task_results_task.delay(skyvern_task_id, application_id)
-        elif current_skyvern_status == "FAILED":
-            new_jobraker_status = 'skyvern_submission_failed'
-            SKYVERN_APPLICATION_SUBMISSIONS_TOTAL.labels(status='failed').inc()
-            # Store error details from Skyvern if available in results, or this message
-            application.skyvern_response_data = status_response # Store the status response itself
-        elif current_skyvern_status == "CANCELED":
-            new_jobraker_status = 'skyvern_canceled'
-            SKYVERN_APPLICATION_SUBMISSIONS_TOTAL.labels(status='canceled').inc()
-            application.skyvern_response_data = status_response
-        elif current_skyvern_status == "REQUIRES_ATTENTION":
-            new_jobraker_status = 'skyvern_requires_attention'
-            SKYVERN_APPLICATION_SUBMISSIONS_TOTAL.labels(status='requires_attention').inc()
-            application.skyvern_response_data = status_response
-        elif current_skyvern_status in ["PENDING", "RUNNING"]:
-            # Still ongoing, ensure JobRaker status reflects this if it was different
-            if application.status not in ['submitting_via_skyvern']:
-                 new_jobraker_status = 'submitting_via_skyvern'
-            logger.info(f"Skyvern task {skyvern_task_id} is still {current_skyvern_status}.")
-            # No need to explicitly retry here for PENDING/RUNNING if this task is scheduled periodically by Celery Beat,
-            # or if a webhook is the primary update mechanism. If purely polling, a retry might be desired.
-            # For now, assume periodic checks or webhook will handle follow-up.
-        else: # Unknown status
-            logger.warning(f"Unknown Skyvern status '{current_skyvern_status}' for task {skyvern_task_id}.")
-            # Potentially set a generic error or requires attention status
-            # For now, no status change for unknown Skyvern status.
-
-        if new_jobraker_status != application.status or application.applied_at: # If status changed or applied_at set
-            application.status = new_jobraker_status
-            fields_to_update = ['status', 'updated_at']
-            if application.applied_at: # Ensure applied_at is in update_fields if set
-                fields_to_update.append('applied_at')
-            if application.skyvern_response_data: # Ensure response data is in update_fields if set
-                fields_to_update.append('skyvern_response_data')
-            application.save(update_fields=fields_to_update)
-            logger.info(f"Updated JobRaker app ID {application_id} status to {new_jobraker_status} for Skyvern task {skyvern_task_id}")
-
-        return {"status": "polled", "skyvern_task_id": skyvern_task_id, "skyvern_status": current_skyvern_status, "application_id": application_id}
-
-    except Exception as exc: # For API call errors or other issues
-        logger.error(f"Error in check_skyvern_task_status_task for Skyvern task {skyvern_task_id}: {exc}")
-        raise self.retry(exc=exc) # Celery will use default_retry_delay
-
-
-# Placeholder for task to retrieve results, can be called after status is COMPLETED
-@shared_task(bind=True, max_retries=3)
-def retrieve_skyvern_task_results_task(self, skyvern_task_id: str, application_id: str):
-    from apps.integrations.services.skyvern import SkyvernAPIClient
-    from apps.jobs.models import Application # Now using the Application model
-
-    logger.info(f"Retrieving results for Skyvern task {skyvern_task_id}, JobRaker app ID: {application_id}")
-
-    try:
-        application = Application.objects.get(id=application_id, skyvern_task_id=skyvern_task_id)
-    except Application.DoesNotExist:
-        logger.error(f"Application {application_id} with Skyvern task ID {skyvern_task_id} not found in retrieve_skyvern_task_results_task.")
-        # No retry, data issue.
-        return {"status": "error", "application_id": application_id, "error": "Application for Skyvern task not found"}
-
-    client = SkyvernAPIClient()
-    try:
-        results_response = client.get_task_results(skyvern_task_id)
-
-        if results_response:
-            logger.info(f"Results for Skyvern task {skyvern_task_id}: {results_response}")
-            application.skyvern_response_data = results_response # Store the entire raw response
-
-            # Potentially parse results_response.get('data') for specific confirmation details
-            # or results_response.get('error_details') if status was FAILED.
-            # For now, storing raw response is sufficient.
-            # If Skyvern task failed and results contain error details, ensure status reflects this.
-            skyvern_status_in_results = results_response.get("status")
-            if skyvern_status_in_results == "FAILED" and application.status != 'skyvern_submission_failed':
-                application.status = 'skyvern_submission_failed'
-                logger.info(f"Updating application {application_id} status to 'skyvern_submission_failed' based on task results.")
-
-            application.save(update_fields=['skyvern_response_data', 'status', 'updated_at'])
-            return {"status": "success", "skyvern_task_id": skyvern_task_id, "application_id": application_id, "results_fetched": True}
-        else:
-            logger.warning(f"No results data found for Skyvern task {skyvern_task_id} (API call might have returned None or empty).")
-            # Optionally update application model to note that results retrieval was attempted but empty.
-            application.skyvern_response_data = {"info": "Results retrieval attempted, no data returned by Skyvern."}
-            application.save(update_fields=['skyvern_response_data', 'updated_at'])
-            return {"status": "no_results_data", "skyvern_task_id": skyvern_task_id, "application_id": application_id}
-
-    except Exception as exc:
-        logger.error(f"Error retrieving results for Skyvern task {skyvern_task_id}: {exc}")
-        raise self.retry(exc=exc)
-
-
-# --- Task for KnowledgeArticle RAG Ingestion ---
-@shared_task(bind=True, max_retries=3)
-def process_knowledge_article_for_rag_task(self, article_id: int):
-    """
-    Generates embedding for a KnowledgeArticle and ingests/updates it in the RAG vector store.
-    Args:
-        article_id: ID of the KnowledgeArticle to process.
-    """
-    try:
-        from apps.common.models import KnowledgeArticle
-        from apps.integrations.services.openai import EmbeddingService # Consolidated
-        from apps.common.services import VectorDBService
-
-        article = KnowledgeArticle.objects.get(id=article_id)
-
-        if not article.is_active:
-            logger.info(f"KnowledgeArticle {article_id} is not active. Deleting from RAG store if present.")
-            vector_db_service = VectorDBService()
-            vector_db_service.delete_documents(source_type=article.source_type, source_id=str(article.id))
-            return {'status': 'skipped_inactive_deleted', 'article_id': article_id}
-
-        embedding_service = EmbeddingService()
-        vector_db_service = VectorDBService()
-        model_name = embedding_service.embedding_model # For metrics
-
-        text_to_embed = f"Title: {article.title}\nContent: {article.content}"
-
-        embedding_generation_status = 'error'
-        article_embedding_list = None
-        try:
-            emb_start_time = time.monotonic()
-            article_embedding_list = embedding_service.generate_embeddings([text_to_embed])
-            embedding_generation_status = 'success' if article_embedding_list and article_embedding_list[0] else 'no_embedding_generated'
-        except Exception as e:
-            logger.error(f"EmbeddingService call failed for KnowledgeArticle {article_id}: {e}")
-            raise # Re-raise to trigger Celery retry
-        finally:
-            emb_duration = time.monotonic() - emb_start_time
-            OPENAI_API_CALL_DURATION_SECONDS.labels(type=f'embedding_knowledge_{article.source_type}', model=model_name).observe(emb_duration)
-            OPENAI_API_CALLS_TOTAL.labels(type=f'embedding_knowledge_{article.source_type}', model=model_name, status=embedding_generation_status).inc()
-
-        if article_embedding_list and article_embedding_list[0]:
-            article_embedding = article_embedding_list[0]
-
-            metadata_for_rag = {
-                'article_id_original': str(article.id),
-                'title': article.title,
-                'category': article.category,
-                'tags': article.get_tags_list(), # Store as list
-                'source_type_display': article.get_source_type_display() # Store display name
-            }
-
-            # Delete existing RAG document for this article_id to ensure freshness
-            vector_db_service.delete_documents(source_type=article.source_type, source_id=str(article.id))
-
-            add_status = vector_db_service.add_documents(
-                texts=[text_to_embed], # Could also store just article.content if title is only for metadata
-                embeddings=[article_embedding],
-                source_types=[article.source_type], # Use the article's own source_type
-                source_ids=[str(article.id)],
-                metadatas=[metadata_for_rag]
-            )
-
-            if add_status:
-                logger.info(f"Successfully processed and ingested KnowledgeArticle {article.id} ('{article.title}') for RAG.")
-                return {'status': 'success', 'article_id': article_id, 'rag_ingested': True}
-            else:
-                logger.error(f"Failed to add/update KnowledgeArticle {article.id} in RAG vector store.")
-                return {'status': 'rag_add_failed', 'article_id': article_id, 'rag_ingested': False}
-        else:
-            logger.warning(f"No embedding generated for KnowledgeArticle {article.id}, RAG ingestion skipped.")
-            return {'status': 'no_embedding', 'article_id': article_id, 'rag_ingested': False}
-
-    except KnowledgeArticle.DoesNotExist:
-        logger.error(f"KnowledgeArticle not found: {article_id}")
-        return {'status': 'article_not_found', 'article_id': article_id}
-    except Exception as exc:
-        logger.error(f"Error processing KnowledgeArticle {article_id} for RAG: {exc}")
-        raise self.retry(exc=exc, countdown=60 * (2 ** self.request.retries))
-
+# =======================
+# CRITICAL MISSING TASKS
+# =======================
 
 @shared_task(bind=True, max_retries=3)
-def generate_interview_questions_task(self, job_id: str, user_id: Optional[str] = None):
+def automated_daily_job_sync(self):
     """
-    Generates interview questions for a specific job using OpenAI.
-    Optionally considers user profile for personalization if user_id is provided.
+    Daily automated job synchronization from all sources.
+    This is the main job that runs daily to fetch new jobs.
     """
-    from apps.jobs.models import Job
-    from apps.accounts.models import UserProfile # For fetching user profile summary
-    from apps.integrations.services.openai import OpenAIClient
-
-    logger.info(f"Starting interview question generation for Job ID: {job_id}, User ID: {user_id}")
-
     try:
-        job = Job.objects.get(id=job_id)
-    except Job.DoesNotExist:
-        logger.error(f"Job with ID {job_id} not found for interview question generation.")
-        return {"status": "error", "error": "Job not found", "job_id": job_id}
-
-    user_profile_summary = None
-    if user_id:
-        try:
-            user_profile = UserProfile.objects.get(user_id=user_id)
-            # Create a concise summary from the profile. Adjust fields as needed.
-            summary_parts = []
-            if user_profile.current_title:
-                summary_parts.append(f"Current Title: {user_profile.current_title}")
-            if user_profile.experience_level:
-                summary_parts.append(f"Experience Level: {user_profile.get_experience_level_display()}") # Use display value
-            if user_profile.skills:
-                summary_parts.append(f"Key Skills: {', '.join(user_profile.skills[:5])}") # Top 5 skills
-            if user_profile.bio:
-                summary_parts.append(f"Bio Snippet: {user_profile.bio[:200]}...") # Short bio snippet
-
-            if summary_parts:
-                user_profile_summary = ". ".join(summary_parts)
-            logger.info(f"User profile summary for personalization: {user_profile_summary}")
-
-        except UserProfile.DoesNotExist:
-            logger.warning(f"UserProfile not found for User ID: {user_id}. Proceeding without personalization.")
-        except Exception as e:
-            logger.error(f"Error fetching or summarizing UserProfile for User ID {user_id}: {e}")
-            # Proceed without personalization if profile fetching fails
-
-    client = OpenAIClient()
-    model_name_client = "gpt-4"  # Default model name for metrics
-
-    api_call_status = 'error'
-    questions = []
-    start_time = time.monotonic() # For duration metric
-
-    try:
-        questions = client.generate_interview_questions(
-            job_title=job.title,
-            job_description=job.description,
-            # num_questions=10, # Default in client method
-            # question_types=["technical", "behavioral", "situational"], # Example, or let client default
-            user_profile_summary=user_profile_summary
-        )
-        api_call_status = 'success' if questions else 'no_questions_generated'
-
-        # Log result for now. The task result will be stored by Celery if a backend is configured.
-        logger.info(f"Generated {len(questions)} interview questions for Job ID: {job_id}. API status: {api_call_status}")
-
-        # The return value of the task is what gets stored in the result backend.
+        logger.info("Starting daily automated job sync")
+        
+        # 1. Fetch from Adzuna API
+        adzuna_stats = fetch_adzuna_jobs.delay([
+            'software', 'engineering', 'data', 'product', 'marketing', 
+            'sales', 'finance', 'operations', 'design', 'hr'
+        ], max_days_old=1)
+        
+        # 2. Clean up old jobs (older than 30 days)
+        cleanup_stats = cleanup_old_jobs.delay(days_old=30)
+        
+        # 3. Update job statistics
+        update_job_statistics.delay()
+        
+        logger.info("Daily job sync tasks queued successfully")
         return {
-            "job_id": str(job.id),
-            "job_title": job.title,
-            "questions": questions,
-            "status": api_call_status # To indicate if questions were successfully generated by OpenAI
+            'status': 'success',
+            'adzuna_task_id': adzuna_stats.id,
+            'cleanup_task_id': cleanup_stats.id,
+            'timestamp': timezone.now().isoformat()
         }
+        
+    except Exception as exc:
+        logger.error(f"Error in daily job sync: {exc}")
+        raise self.retry(exc=exc, countdown=300)  # 5 minute retry
 
-    except Exception as e:
-        logger.error(f"OpenAIClient call failed in generate_interview_questions_task for Job {job_id}: {e}", exc_info=True)
-        # Re-raise to allow Celery to retry if max_retries not reached
-        # OPENAI_API_CALLS_TOTAL metric will be updated by the finally block if it's outside this try
-        raise self.retry(exc=e, countdown=60 * (2 ** self.request.retries))
-    finally:
-        duration = time.monotonic() - start_time
-        OPENAI_API_CALL_DURATION_SECONDS.labels(type='interview_question_generation', model=model_name_client or 'unknown').observe(duration)
-        OPENAI_API_CALLS_TOTAL.labels(type='interview_question_generation', model=model_name_client or 'unknown', status=api_call_status).inc()
+
+@shared_task(bind=True, max_retries=3)
+def cleanup_old_jobs(self, days_old=30):
+    """
+    Clean up old job postings to keep database manageable.
+    """
+    try:
+        from apps.jobs.models import Job
+        
+        cutoff_date = timezone.now() - timedelta(days=days_old)
+        
+        # Mark old jobs as inactive instead of deleting
+        updated_count = Job.objects.filter(
+            created_at__lt=cutoff_date,
+            is_active=True
+        ).update(is_active=False)
+        
+        logger.info(f"Marked {updated_count} old jobs as inactive")
+        return {'cleaned_jobs': updated_count}
+        
+    except Exception as exc:
+        logger.error(f"Error cleaning up old jobs: {exc}")
+        raise self.retry(exc=exc, countdown=300)
+
+
+@shared_task(bind=True, max_retries=3)
+def update_job_statistics(self):
+    """
+    Update job market statistics and trends.
+    """
+    try:
+        from apps.jobs.models import Job
+        from django.db.models import Count, Avg
+        
+        # Calculate statistics
+        stats = {
+            'total_active_jobs': Job.objects.filter(is_active=True).count(),
+            'jobs_by_type': dict(Job.objects.filter(is_active=True)
+                                .values('job_type')
+                                .annotate(count=Count('id'))),
+            'avg_salary': Job.objects.filter(
+                is_active=True, 
+                salary_min__isnull=False
+            ).aggregate(avg=Avg('salary_min'))['avg'],
+            'updated_at': timezone.now().isoformat()
+        }
+        
+        # Could store in cache or dedicated statistics table
+        from django.core.cache import cache
+        cache.set('job_market_stats', stats, timeout=86400)  # 24 hours
+        
+        logger.info(f"Updated job statistics: {stats['total_active_jobs']} active jobs")
+        return stats
+        
+    except Exception as exc:
+        logger.error(f"Error updating job statistics: {exc}")
+        raise self.retry(exc=exc, countdown=300)
+
+
+@shared_task(bind=True, max_retries=3)
+def intelligent_job_matching(self, user_id):
+    """
+    AI-powered job matching for a specific user.
+    Generates personalized job recommendations.
+    """
+    try:
+        from apps.jobs.models import Job, RecommendedJob
+        from apps.integrations.services.openai import EmbeddingService
+        from apps.common.services import VectorDBService
+        
+        user = User.objects.get(id=user_id)
+        profile = getattr(user, 'profile', None)
+        
+        if not profile:
+            logger.warning(f"User {user_id} has no profile for job matching")
+            return {'status': 'no_profile'}
+        
+        # Generate user profile embedding if not exists
+        if not profile.profile_embedding:
+            generate_user_profile_embeddings.delay(user_id)
+            logger.info(f"Queued profile embedding generation for user {user_id}")
+            return {'status': 'embedding_queued'}
+        
+        # Use vector search to find similar jobs
+        vector_db_service = VectorDBService()
+        embedding_service = EmbeddingService()
+        
+        # Create search query from user profile
+        search_text = f"Job seeker with skills: {profile.skills}, experience: {profile.experience_level}, interests: {profile.bio}"
+        
+        # Get job recommendations
+        similar_jobs = vector_db_service.search_similar_documents(
+            query_text=search_text,
+            source_type='job_listing',
+            limit=20
+        )
+        
+        # Process recommendations
+        recommendations_created = 0
+        for job_match in similar_jobs:
+            try:
+                job_id = job_match.get('metadata', {}).get('job_id_original')
+                if job_id:
+                    job = Job.objects.get(id=job_id, is_active=True)
+                    
+                    # Create or update recommendation
+                    recommendation, created = RecommendedJob.objects.get_or_create(
+                        user=user,
+                        job=job,
+                        defaults={
+                            'match_score': job_match.get('similarity_score', 0.0),
+                            'recommendation_reason': f"AI match score: {job_match.get('similarity_score', 0.0):.2f}"
+                        }
+                    )
+                    
+                    if created:
+                        recommendations_created += 1
+                        
+            except Job.DoesNotExist:
+                continue
+        
+        logger.info(f"Generated {recommendations_created} new job recommendations for user {user_id}")
+        
+        # Trigger email notification if user has recommendations
+        if recommendations_created > 0:
+            from apps.notifications.tasks import send_job_recommendations_task
+            send_job_recommendations_task.delay(user_id)
+        
+        return {
+            'status': 'success',
+            'recommendations_created': recommendations_created,
+            'user_id': str(user_id)
+        }
+        
+    except User.DoesNotExist:
+        logger.error(f"User {user_id} not found for job matching")
+        return {'status': 'user_not_found'}
+    except Exception as exc:
+        logger.error(f"Error in intelligent job matching for user {user_id}: {exc}")
+        raise self.retry(exc=exc, countdown=300)
+
+
+@shared_task(bind=True, max_retries=3)
+def batch_intelligent_job_matching(self, limit=50):
+    """
+    Run intelligent job matching for multiple users.
+    """
+    try:
+        from apps.accounts.models import UserProfile
+        
+        # Get users with profiles who haven't had recommendations recently
+        cutoff_time = timezone.now() - timedelta(days=7)  # Weekly recommendations
+        
+        users_for_matching = User.objects.filter(
+            profile__isnull=False,
+            is_active=True
+        ).exclude(
+            recommendedjob__created_at__gte=cutoff_time
+        )[:limit]
+        
+        queued_count = 0
+        for user in users_for_matching:
+            intelligent_job_matching.delay(user.id)
+            queued_count += 1
+        
+        logger.info(f"Queued intelligent job matching for {queued_count} users")
+        return {'status': 'success', 'queued_users': queued_count}
+        
+    except Exception as exc:
+        logger.error(f"Error in batch job matching: {exc}")
+        raise self.retry(exc=exc, countdown=300)
+
+
+@shared_task(bind=True, max_retries=3)
+def submit_application_via_skyvern(self, application_id):
+    """
+    Submit job application using Skyvern automation.
+    """
+    try:
+        from apps.jobs.models import Application
+        from apps.integrations.services.skyvern import SkyvernAPIClient
+        
+        application = Application.objects.select_related('user', 'job').get(id=application_id)
+        
+        # Check if application can be automated
+        if not application.job.application_url:
+            logger.warning(f"Job {application.job.id} has no application URL for Skyvern automation")
+            return {'status': 'no_url', 'application_id': application_id}
+        
+        skyvern_client = SkyvernAPIClient()
+        
+        # Prepare application data
+        application_data = {
+            'url': application.job.application_url,
+            'user_data': {
+                'name': f"{application.user.first_name} {application.user.last_name}",
+                'email': application.user.email,
+                'phone': getattr(application.user.profile, 'phone_number', ''),
+                'resume_url': application.resume_file.url if application.resume_file else None,
+                'cover_letter': application.cover_letter or ''
+            },
+            'job_data': {
+                'title': application.job.title,
+                'company': application.job.company,
+                'location': application.job.location
+            }
+        }
+        
+        # Create Skyvern task
+        task_result = skyvern_client.create_task(
+            url=application.job.application_url,
+            task_data=application_data
+        )
+        
+        if task_result and 'task_id' in task_result:
+            # Update application with Skyvern task ID
+            application.skyvern_task_id = task_result['task_id']
+            application.status = 'submitted'
+            application.save()
+            
+            # Queue status monitoring
+            monitor_skyvern_task.delay(application.id, task_result['task_id'])
+            
+            logger.info(f"Skyvern task {task_result['task_id']} created for application {application_id}")
+            
+            # Send status update email
+            from apps.notifications.tasks import send_application_status_update_task
+            send_application_status_update_task.delay(application_id, 'pending')
+            
+            return {
+                'status': 'submitted',
+                'task_id': task_result['task_id'],
+                'application_id': application_id
+            }
+        else:
+            logger.error(f"Failed to create Skyvern task for application {application_id}")
+            return {'status': 'failed_to_create_task'}
+        
+    except Application.DoesNotExist:
+        logger.error(f"Application {application_id} not found")
+        return {'status': 'application_not_found'}
+    except Exception as exc:
+        logger.error(f"Error submitting application {application_id} via Skyvern: {exc}")
+        raise self.retry(exc=exc, countdown=600)  # 10 minute retry
+
+
+@shared_task(bind=True, max_retries=5)
+def monitor_skyvern_task(self, application_id, task_id):
+    """
+    Monitor Skyvern task status and update application accordingly.
+    """
+    try:
+        from apps.jobs.models import Application
+        from apps.integrations.services.skyvern import SkyvernAPIClient
+        
+        application = Application.objects.get(id=application_id)
+        skyvern_client = SkyvernAPIClient()
+        
+        # Check task status
+        task_status = skyvern_client.get_task_status(task_id)
+        
+        if not task_status:
+            logger.warning(f"Could not get status for Skyvern task {task_id}")
+            raise self.retry(countdown=300)  # Retry in 5 minutes
+        
+        status = task_status.get('status', '').lower()
+        
+        if status == 'completed':
+            # Get task results
+            task_result = skyvern_client.get_task_result(task_id)
+            
+            if task_result and task_result.get('success'):
+                application.status = 'submitted'
+                application.skyvern_result = task_result
+                application.save()
+                
+                logger.info(f"Skyvern application submission completed for application {application_id}")
+                
+                # Send success notification
+                from apps.notifications.tasks import send_application_status_update_task
+                send_application_status_update_task.delay(application_id, 'pending')
+                
+                return {'status': 'completed', 'success': True}
+            else:
+                application.status = 'failed'
+                application.skyvern_result = task_result
+                application.save()
+                
+                logger.error(f"Skyvern task {task_id} completed but failed for application {application_id}")
+                return {'status': 'completed', 'success': False}
+                
+        elif status == 'failed':
+            application.status = 'failed'
+            application.skyvern_result = task_status
+            application.save()
+            
+            logger.error(f"Skyvern task {task_id} failed for application {application_id}")
+            return {'status': 'failed'}
+            
+        elif status in ['running', 'queued', 'pending']:
+            # Task still in progress, retry monitoring
+            logger.info(f"Skyvern task {task_id} still {status}, will retry monitoring")
+            raise self.retry(countdown=300)  # Check again in 5 minutes
+            
+        else:
+            logger.warning(f"Unknown Skyvern task status: {status} for task {task_id}")
+            raise self.retry(countdown=300)
+        
+    except Application.DoesNotExist:
+        logger.error(f"Application {application_id} not found while monitoring Skyvern task")
+        return {'status': 'application_not_found'}
+    except Exception as exc:
+        logger.error(f"Error monitoring Skyvern task {task_id}: {exc}")
+        raise self.retry(exc=exc, countdown=600)
+
+
+@shared_task(bind=True, max_retries=3)
+def process_pending_applications(self):
+    """
+    Process applications that are pending Skyvern automation.
+    """
+    try:
+        from apps.jobs.models import Application
+        
+        # Get pending applications that haven't been processed
+        pending_applications = Application.objects.filter(
+            status='pending',
+            skyvern_task_id__isnull=True,
+            job__application_url__isnull=False
+        ).select_related('user', 'job')[:10]  # Limit to avoid overwhelming Skyvern
+        
+        processed_count = 0
+        for application in pending_applications:
+            submit_application_via_skyvern.delay(application.id)
+            processed_count += 1
+        
+        logger.info(f"Queued {processed_count} applications for Skyvern processing")
+        return {'status': 'success', 'queued_applications': processed_count}
+        
+    except Exception as exc:
+        logger.error(f"Error processing pending applications: {exc}")
+        raise self.retry(exc=exc, countdown=300)
+
+
+@shared_task(bind=True)
+def weekly_system_maintenance(self):
+    """
+    Weekly maintenance tasks for the system.
+    """
+    try:
+        logger.info("Starting weekly system maintenance")
+        
+        # 1. Batch generate missing embeddings
+        batch_generate_job_embeddings.delay(limit=100)
+        batch_generate_user_embeddings.delay(limit=100)
+        
+        # 2. Run intelligent job matching for all users
+        batch_intelligent_job_matching.delay(limit=200)
+        
+        # 3. Clean up old data
+        cleanup_old_jobs.delay(days_old=45)
+        
+        # 4. Update statistics
+        update_job_statistics.delay()
+        
+        logger.info("Weekly maintenance tasks queued successfully")
+        return {'status': 'success', 'timestamp': timezone.now().isoformat()}
+        
+    except Exception as exc:
+        logger.error(f"Error in weekly maintenance: {exc}")
+        return {'status': 'error', 'error': str(exc)}

@@ -199,194 +199,208 @@ def send_follow_up_reminder_task(self, application_id: int):
         self.retry(countdown=60 * (self.request.retries + 1))
 
 
-@shared_task
-def process_daily_job_alerts():
-    """
-    Celery task to process all daily job alerts.
-    """
-    daily_alerts = JobAlert.objects.filter(
-        is_active=True,
-        frequency='daily'
-    )
-    
-    count = 0
-    for alert in daily_alerts:
-        send_job_alert_email_task.delay(alert.id)
-        count += 1
-    
-    logger.info(f"Queued {count} daily job alerts for processing")
+# =======================
+# MISSING CRITICAL NOTIFICATION TASKS
+# =======================
 
-
-@shared_task
-def process_weekly_job_alerts():
+@shared_task(bind=True, max_retries=3)
+def process_daily_job_alerts(self):
     """
-    Celery task to process all weekly job alerts.
+    Process all daily job alerts for active users.
     """
-    weekly_alerts = JobAlert.objects.filter(
-        is_active=True,
-        frequency='weekly'
-    )
-    
-    count = 0
-    for alert in weekly_alerts:
-        send_job_alert_email_task.delay(alert.id)
-        count += 1
-    
-    logger.info(f"Queued {count} weekly job alerts for processing")
-
-
-@shared_task
-def send_weekly_job_recommendations():
-    """
-    Celery task to send weekly job recommendations to all active users.
-    """
-    # Get users who have been active in the last 30 days
-    active_users = User.objects.filter(
-        is_active=True,
-        last_login__gte=timezone.now() - timedelta(days=30)
-    )
-    
-    count = 0
-    for user in active_users:
-        send_job_recommendations_task.delay(user.id)
-        count += 1
-    
-    logger.info(f"Queued job recommendations for {count} active users")
-
-
-@shared_task
-def send_application_follow_up_reminders():
-    """
-    Celery task to send follow-up reminders for applications after 7 days.
-    """
-    # Get applications that are 7 days old and still pending
-    seven_days_ago = timezone.now() - timedelta(days=7)
-    
-    applications = Application.objects.filter(
-        applied_at__date=seven_days_ago.date(),
-        status__in=['submitted', 'under_review']
-    )
-    
-    count = 0
-    for application in applications:
-        send_follow_up_reminder_task.delay(application.id)
-        count += 1
-    
-    logger.info(f"Queued {count} follow-up reminder emails")
+    try:
+        # Get all active daily job alerts
+        daily_alerts = JobAlert.objects.filter(
+            is_active=True,
+            frequency='daily'
+        ).select_related('user')
+        
+        processed_count = 0
+        for alert in daily_alerts:
+            # Check if alert was already sent today
+            today = timezone.now().date()
+            if alert.last_sent_at and alert.last_sent_at.date() == today:
+                continue
+            
+            # Queue individual alert processing
+            send_job_alert_email_task.delay(alert.id)
+            processed_count += 1
+        
+        logger.info(f"Queued {processed_count} daily job alerts for processing")
+        return {'status': 'success', 'processed_count': processed_count}
+        
+    except Exception as exc:
+        logger.error(f"Error processing daily job alerts: {exc}")
+        raise self.retry(exc=exc, countdown=300)
 
 
 @shared_task(bind=True, max_retries=3)
-def send_bulk_notification_task(
-    self,
-    user_ids: List[int],
-    subject: str,
-    template_name: str,
-    context: Dict[str, Any]
-):
+def process_weekly_job_alerts(self):
     """
-    Celery task to send bulk notifications to multiple users.
+    Process all weekly job alerts for active users.
     """
     try:
-        users = User.objects.filter(id__in=user_ids, is_active=True)
+        # Get all active weekly job alerts
+        weekly_alerts = JobAlert.objects.filter(
+            is_active=True,
+            frequency='weekly'
+        ).select_related('user')
         
-        email_service = EmailService()
-        results = email_service.send_bulk_notification(
-            users=list(users),
-            subject=subject,
-            template_name=template_name,
-            context=context
-        )
+        processed_count = 0
+        for alert in weekly_alerts:
+            # Check if alert was already sent this week
+            week_ago = timezone.now() - timedelta(days=7)
+            if alert.last_sent_at and alert.last_sent_at >= week_ago:
+                continue
+            
+            # Queue individual alert processing
+            send_job_alert_email_task.delay(alert.id)
+            processed_count += 1
         
-        logger.info(f"Bulk notification sent: {results}")
-        return results
+        logger.info(f"Queued {processed_count} weekly job alerts for processing")
+        return {'status': 'success', 'processed_count': processed_count}
         
-    except Exception as e:
-        logger.error(f"Error sending bulk notification: {e}")
-        self.retry(countdown=60 * (self.request.retries + 1))
+    except Exception as exc:
+        logger.error(f"Error processing weekly job alerts: {exc}")
+        raise self.retry(exc=exc, countdown=300)
 
 
-@shared_task
-def cleanup_old_notifications():
+@shared_task(bind=True, max_retries=3)
+def send_weekly_job_recommendations(self):
     """
-    Celery task to cleanup old notification records.
+    Send weekly job recommendations to all active users.
     """
-    # This would cleanup old notification records if we had a notification model
-    # For now, it's a placeholder for future implementation
-    logger.info("Notification cleanup task executed")
-def send_notification_email(self, notification_id):
+    try:
+        # Get users who haven't received recommendations recently
+        week_ago = timezone.now() - timedelta(days=7)
+        
+        users_for_recommendations = User.objects.filter(
+            is_active=True,
+            profile__isnull=False
+        ).exclude(
+            # Exclude users who got recommendations recently
+            id__in=User.objects.filter(
+                email_log__template_name='job_recommendations',
+                email_log__sent_at__gte=week_ago
+            ).values('id')
+        )[:100]  # Limit to avoid overwhelming the system
+        
+        processed_count = 0
+        for user in users_for_recommendations:
+            send_job_recommendations_task.delay(user.id)
+            processed_count += 1
+        
+        logger.info(f"Queued {processed_count} weekly job recommendation emails")
+        return {'status': 'success', 'processed_count': processed_count}
+        
+    except Exception as exc:
+        logger.error(f"Error sending weekly job recommendations: {exc}")
+        raise self.retry(exc=exc, countdown=300)
+
+
+@shared_task(bind=True, max_retries=3)
+def send_application_follow_up_reminders(self):
     """
-    Send an email notification to a user.
-    
-    Args:
-        notification_id: ID of the notification to send via email
+    Send follow-up reminders for applications that need attention.
+    """
+    try:
+        # Find applications that need follow-up (7 days after submission)
+        week_ago = timezone.now() - timedelta(days=7)
+        
+        applications_needing_followup = Application.objects.filter(
+            status__in=['submitted', 'under_review'],
+            created_at__lte=week_ago,
+            follow_up_sent_at__isnull=True
+        ).select_related('user', 'job')[:50]  # Limit to avoid spam
+        
+        processed_count = 0
+        for application in applications_needing_followup:
+            send_follow_up_reminder_task.delay(application.id)
+            # Mark that follow-up was queued
+            application.follow_up_sent_at = timezone.now()
+            application.save(update_fields=['follow_up_sent_at'])
+            processed_count += 1
+        
+        logger.info(f"Queued {processed_count} application follow-up reminders")
+        return {'status': 'success', 'processed_count': processed_count}
+        
+    except Exception as exc:
+        logger.error(f"Error sending application follow-up reminders: {exc}")
+        raise self.retry(exc=exc, countdown=300)
+
+
+@shared_task(bind=True, max_retries=3)
+def cleanup_old_notifications(self):
+    """
+    Clean up old notifications to keep the database manageable.
     """
     try:
         from apps.notifications.models import Notification
-        from django.core.mail import send_mail
+        
+        # Delete notifications older than 30 days
+        cutoff_date = timezone.now() - timedelta(days=30)
+        
+        deleted_count, _ = Notification.objects.filter(
+            created_at__lt=cutoff_date
+        ).delete()
+        
+        logger.info(f"Cleaned up {deleted_count} old notifications")
+        return {'status': 'success', 'deleted_count': deleted_count}
+        
+    except Exception as exc:
+        logger.error(f"Error cleaning up old notifications: {exc}")
+        raise self.retry(exc=exc, countdown=300)
+
+
+@shared_task(bind=True, max_retries=3)
+def send_system_digest_email(self, admin_email=None):
+    """
+    Send daily system digest to administrators.
+    """
+    try:
+        from django.core.mail import mail_admins
         from django.conf import settings
         
-        notification = Notification.objects.get(id=notification_id)
+        # Gather system statistics
+        stats = {
+            'active_users': User.objects.filter(is_active=True).count(),
+            'total_jobs': Job.objects.filter(is_active=True).count(),
+            'applications_today': Application.objects.filter(
+                created_at__gte=timezone.now().date()
+            ).count(),
+            'job_alerts_active': JobAlert.objects.filter(is_active=True).count(),
+            'notifications_sent_today': 0,  # Would need email tracking model
+        }
         
-        if not notification.user.email:
-            logger.warning(f"User {notification.user.id} has no email address for notification {notification_id}")
-            return {'status': 'no_email', 'notification_id': notification_id}
+        # Create digest message
+        message = f"""
+Daily Jobraker System Digest - {timezone.now().date()}
+
+System Statistics:
+- Active Users: {stats['active_users']}
+- Active Jobs: {stats['total_jobs']}
+- Applications Today: {stats['applications_today']}
+- Active Job Alerts: {stats['job_alerts_active']}
+- Notifications Sent: {stats['notifications_sent_today']}
+
+System Status: Operational
+        """
         
-        # Send email
-        subject = f"Jobraker: {notification.title}"
-        message = notification.message
+        # Send to admin email or site admins
+        if admin_email:
+            from django.core.mail import send_mail
+            send_mail(
+                'Jobraker Daily Digest',
+                message,
+                settings.DEFAULT_FROM_EMAIL,
+                [admin_email],
+            )
+        else:
+            mail_admins('Jobraker Daily Digest', message)
         
-        send_mail(
-            subject,
-            message,
-            settings.DEFAULT_FROM_EMAIL,
-            [notification.user.email],
-            fail_silently=False,
-        )
-        
-        # Mark as email sent
-        notification.email_sent = True
-        notification.email_sent_at = timezone.now()
-        notification.save(update_fields=['email_sent', 'email_sent_at'])
-        
-        logger.info(f"Email sent for notification {notification_id} to {notification.user.email}")
-        return {'status': 'success', 'notification_id': notification_id}
-        
-    except Notification.DoesNotExist:
-        logger.error(f"Notification {notification_id} not found")
-        return {'status': 'not_found', 'notification_id': notification_id}
+        logger.info("System digest email sent successfully")
+        return {'status': 'success', 'stats': stats}
         
     except Exception as exc:
-        logger.error(f"Error sending email for notification {notification_id}: {exc}")
-        raise self.retry(exc=exc, countdown=60 * (2 ** self.request.retries))
-
-
-@shared_task(bind=True, max_retries=3)
-def batch_process_pending_notifications(self, limit=100):
-    """
-    Process pending notifications that need to be sent via email.
-    
-    Args:
-        limit: Maximum number of notifications to process in this batch
-    """
-    try:
-        from apps.notifications.models import Notification
-        
-        # Find pending notifications that haven't been emailed yet
-        pending_notifications = Notification.objects.filter(
-            email_sent=False,
-            user__email__isnull=False,
-            user__is_active=True
-        ).select_related('user')[:limit]
-        
-        queued_count = 0
-        for notification in pending_notifications:
-            # Queue individual email task
-            send_notification_email.delay(notification.id)
-            queued_count += 1
-        
-        logger.info(f"Queued {queued_count} notification emails for sending")
-        return {'status': 'success', 'queued_count': queued_count}
-        
-    except Exception as exc:
-        logger.error(f"Error in batch notification processing: {exc}")
-        return {'status': 'error', 'error': str(exc)}
+        logger.error(f"Error sending system digest email: {exc}")
+        raise self.retry(exc=exc, countdown=300)

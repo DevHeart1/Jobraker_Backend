@@ -3,6 +3,7 @@ Email service for Jobraker Backend with template support.
 """
 
 import logging
+from datetime import datetime
 from typing import Dict, List, Optional, Any
 from django.core.mail import EmailMultiAlternatives
 from django.template.loader import render_to_string
@@ -10,6 +11,7 @@ from django.conf import settings
 from django.utils.html import strip_tags
 from django.contrib.auth import get_user_model
 from apps.jobs.models import Job, Application, JobAlert
+from datetime import datetime
 
 logger = logging.getLogger(__name__)
 User = get_user_model()
@@ -268,29 +270,29 @@ class EmailService:
     
     def send_test_email(self, recipient_email: str) -> bool:
         """
-        Send a test email for health check purposes.
+        Send a test email to verify email service functionality.
         
         Args:
-            recipient_email: Test recipient email address
+            recipient_email: Email address to send test email to
             
         Returns:
-            True if test email was sent successfully, False otherwise
+            True if email was sent successfully, False otherwise
         """
         try:
             context = {
-                'company_name': self.company_name,
-                'site_url': getattr(settings, 'SITE_URL', 'http://localhost:8000'),
-                'user': {'email': recipient_email}
+                'user_email': recipient_email,
+                'test_timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                'system_status': 'operational'
             }
             
             return self.send_email(
-                subject="Jobraker Communication System Test",
-                template_name='welcome',  # Use welcome template for test
+                subject="Jobraker Email System Test",
+                template_name="welcome",  # Using welcome template for test
                 context=context,
                 recipient_list=[recipient_email]
             )
         except Exception as e:
-            logger.error(f"Test email failed: {str(e)}")
+            logger.error(f"Failed to send test email to {recipient_email}: {e}")
             return False
     
     def _load_template(self, template_name: str, context: Dict[str, Any]) -> str:

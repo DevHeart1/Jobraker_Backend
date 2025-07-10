@@ -328,7 +328,15 @@ def test_endpoint(request):
     Test endpoint for communication system components.
     """
     try:
-        data = json.loads(request.body) if request.body else {}
+        # Handle JSON parsing more safely
+        if request.body:
+            try:
+                data = json.loads(request.body.decode('utf-8'))
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                data = {}
+        else:
+            data = {}
+            
         test_type = data.get('test_type', 'all')
         
         results = {}

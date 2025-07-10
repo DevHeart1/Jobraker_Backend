@@ -1,195 +1,173 @@
-# 🚀 Jobraker API Integration Setup Guide
+# 🔗 External API Integration Setup Guide
 
-This guide will help you configure the external API integrations for the Jobraker backend system.
+This guide will help you configure and test the external API integrations for the Jobraker backend.
 
-## 📋 Required API Integrations
+## 📋 Required API Credentials
 
-### 🤖 OpenAI API
-**Purpose**: AI-powered job assistance, chat functionality, and resume analysis
+### 1. OpenAI API (Required for AI Features)
+- **Purpose**: Chat assistant, job advice, resume analysis, embeddings
+- **Get API Key**: Visit [OpenAI API Keys](https://platform.openai.com/api-keys)
+- **Cost**: Usage-based pricing, very affordable for development
+- **Setup**:
+  ```bash
+  OPENAI_API_KEY=sk-your-openai-api-key-here
+  OPENAI_MODEL=gpt-4o-mini
+  OPENAI_EMBEDDING_MODEL=text-embedding-3-small
+  ```
 
-**Setup Steps**:
-1. Go to [OpenAI API](https://platform.openai.com/api-keys)
-2. Create an account or sign in
-3. Generate a new API key
-4. Add to your `.env` file:
+### 2. Adzuna Jobs API (Required for Job Data)
+- **Purpose**: Fetch job listings from major job boards
+- **Get Credentials**: Register at [Adzuna Developer Portal](https://developer.adzuna.com/)
+- **Cost**: Free tier available with rate limits
+- **Setup**:
+  ```bash
+  ADZUNA_APP_ID=your-app-id-here
+  ADZUNA_API_KEY=your-api-key-here
+  ```
+
+### 3. Skyvern API (Optional - For Auto-Apply)
+- **Purpose**: Automated job application submission
+- **Get API Key**: Contact [Skyvern](https://skyvern.com/) for access
+- **Cost**: Contact Skyvern for pricing
+- **Setup**:
+  ```bash
+  SKYVERN_API_KEY=your-skyvern-api-key-here
+  SKYVERN_BASE_URL=https://api.skyvern.com
+  ```
+
+## 🚀 Quick Setup Steps
+
+1. **Copy Environment File**:
    ```bash
-   OPENAI_API_KEY=sk-your-openai-api-key-here
-   OPENAI_MODEL=gpt-4o-mini
-   OPENAI_EMBEDDING_MODEL=text-embedding-3-small
+   cp env_template.txt .env
    ```
 
-**Usage Costs**:
-- GPT-4o-mini: ~$0.15/1M input tokens, ~$0.60/1M output tokens
-- text-embedding-3-small: ~$0.02/1M tokens
+2. **Add Your API Keys**:
+   Edit `.env` file and add your actual API credentials.
 
-### 💼 Adzuna Jobs API
-**Purpose**: Job listing aggregation and search functionality
-
-**Setup Steps**:
-1. Go to [Adzuna Developer Portal](https://developer.adzuna.com/)
-2. Register for a developer account
-3. Create a new application
-4. Get your App ID and API Key
-5. Add to your `.env` file:
+3. **Test Your Configuration**:
    ```bash
-   ADZUNA_APP_ID=your-app-id-here
-   ADZUNA_API_KEY=your-api-key-here
+   python manage.py test_apis
    ```
 
-**API Limits**:
-- Free tier: 1,000 calls/month
-- Paid plans available for higher usage
-
-### 🕷️ Skyvern API
-**Purpose**: Automated job application submission
-
-**Setup Steps**:
-1. Go to [Skyvern](https://www.skyvern.com/)
-2. Sign up for an account
-3. Get your API key from the dashboard
-4. Add to your `.env` file:
+4. **Quick Configuration Check**:
    ```bash
-   SKYVERN_API_KEY=your-skyvern-api-key-here
-   SKYVERN_BASE_URL=https://api.skyvern.com
+   python manage.py test_apis --quick
    ```
 
-**Note**: Skyvern is a specialized service for web automation. Contact their team for pricing.
+5. **Test Specific Service**:
+   ```bash
+   python manage.py test_apis --service openai
+   python manage.py test_apis --service adzuna
+   python manage.py test_apis --service skyvern
+   ```
 
-## 🛠️ Testing Your API Setup
+## 🧪 Testing API Integrations
 
-### Quick Configuration Check
+### Using Management Commands
 ```bash
+# Test all APIs
+python manage.py test_apis
+
+# Quick configuration check (no API calls)
 python manage.py test_apis --quick
+
+# Test specific service
+python manage.py test_apis --service openai
 ```
 
-### Full API Integration Test
+### Using API Endpoints
 ```bash
-python manage.py test_apis --verbose
+# Check all API status
+curl -H "Authorization: Bearer YOUR_JWT_TOKEN" \
+     http://localhost:8000/api/integrations/status/
+
+# Test specific API
+curl -H "Authorization: Bearer YOUR_JWT_TOKEN" \
+     http://localhost:8000/api/integrations/test/openai/
+
+# Trigger job sync
+curl -X POST \
+     -H "Authorization: Bearer YOUR_JWT_TOKEN" \
+     -H "Content-Type: application/json" \
+     -d '{"source": "adzuna", "max_days_old": 1}' \
+     http://localhost:8000/api/integrations/sync/
 ```
 
-### Test Specific API
-```bash
-python manage.py test_apis --api openai --verbose
-python manage.py test_apis --api adzuna --verbose  
-python manage.py test_apis --api skyvern --verbose
-```
+## 📊 Integration Status Levels
+
+- **✅ Success**: API is configured and working correctly
+- **⚠️ Warning**: API is configured but has minor issues
+- **❌ Error**: API is not configured or has connection problems
+- **🔧 Not Configured**: API credentials not provided
 
 ## 🔧 Troubleshooting
 
-### Common Issues
+### OpenAI API Issues
+- **Invalid API Key**: Check your API key at [OpenAI Platform](https://platform.openai.com/api-keys)
+- **Rate Limits**: OpenAI has usage limits; check your account limits
+- **Model Not Available**: Ensure you have access to the specified model
 
-#### OpenAI API Issues
-- **Invalid API Key**: Ensure your API key starts with `sk-` and is correctly copied
-- **Quota Exceeded**: Check your OpenAI usage dashboard
-- **Model Not Available**: Verify you have access to the specified model
+### Adzuna API Issues
+- **Authentication Failed**: Verify both APP_ID and API_KEY are correct
+- **Rate Limits**: Free tier has rate limits; check your usage
+- **No Jobs Returned**: Try different search parameters or location
 
-#### Adzuna API Issues
-- **Authentication Failed**: Double-check your App ID and API Key
-- **Rate Limit Exceeded**: Free tier has monthly limits
-- **No Results**: Some search queries may return empty results
+### Skyvern API Issues
+- **Connection Failed**: Check if SKYVERN_BASE_URL is correct
+- **Authentication**: Verify your API key with Skyvern support
+- **Service Unavailable**: Skyvern may be in maintenance
 
-#### Skyvern API Issues
-- **Authentication Failed**: Verify your API key is correct
-- **Service Unavailable**: Skyvern may have service maintenance
+### Celery Issues
+- **Workers Not Found**: Start Celery workers:
+  ```bash
+  celery -A jobraker worker -l info
+  ```
+- **Broker Connection**: Ensure Redis is running:
+  ```bash
+  redis-server
+  ```
 
-### Debug Steps
-1. Check your `.env` file for correct API keys
-2. Verify your internet connection
-3. Check API service status pages
-4. Review Django logs for detailed error messages
+## 🎯 Minimum Required Setup
 
-## 🌐 API Endpoints for Testing
+For basic functionality, you need:
 
-Once configured, you can test the APIs through the Django admin or API endpoints:
+1. **OpenAI API** - For AI features (chat, advice, embeddings)
+2. **Adzuna API** - For job data
+3. **Redis** - For Celery task queue
+4. **PostgreSQL** - For database (SQLite works for development)
 
-- **API Status**: `GET /api/integrations/status/`
-- **Test Connection**: `GET /api/integrations/test/{service}/`
-- **Trigger Job Sync**: `POST /api/integrations/sync/`
+Skyvern is optional and only needed for automated job applications.
 
-## 📊 Monitoring API Usage
+## 🔄 Background Tasks
 
-### View API Status Dashboard
-Navigate to `/admin/` and check the Integrations section for:
-- API call statistics
-- Error rates
-- Rate limit status
-- Last successful calls
+Once APIs are configured, background tasks will:
 
-### Prometheus Metrics
-The system exposes Prometheus metrics for monitoring:
-- `jobraker_openai_api_calls_total`
-- `jobraker_adzuna_api_calls_total`
-- `jobraker_skyvern_api_calls_total`
+1. **Fetch Jobs**: Automatically sync jobs from Adzuna every hour
+2. **Generate Embeddings**: Create AI embeddings for job matching
+3. **Process Applications**: Handle automated job applications via Skyvern
+4. **Send Notifications**: Email users about job matches and updates
 
-## 🔐 Security Best Practices
+## 📈 Monitoring
 
-1. **Environment Variables**: Never commit API keys to version control
-2. **Key Rotation**: Regularly rotate your API keys
-3. **Rate Limiting**: Monitor and respect API rate limits
-4. **Error Handling**: Implement proper error handling and retries
-5. **Logging**: Log API calls for debugging but not sensitive data
+- **API Status**: `/api/integrations/status/`
+- **Configuration**: `/api/integrations/config/`
+- **Manual Sync**: `/api/integrations/sync/`
+- **Test APIs**: `/api/integrations/test/{service}/`
 
-## 📈 Cost Optimization
+## 🔒 Security Notes
 
-### OpenAI
-- Use shorter prompts when possible
-- Implement caching for repeated queries
-- Monitor token usage through the dashboard
+- Never commit `.env` file to version control
+- Rotate API keys regularly
+- Use environment-specific credentials
+- Monitor API usage and costs
+- Implement rate limiting for production
 
-### Adzuna
-- Cache job listings to reduce API calls
-- Use incremental sync instead of full sync
-- Implement circuit breakers for failed calls
+## 💡 Development Tips
 
-### Skyvern
-- Batch application submissions
-- Use webhooks instead of polling for status updates
-- Implement proper error handling and retries
+- Use mock responses when APIs are not configured
+- Test with small job sync batches first
+- Monitor Celery task logs for debugging
+- Use the quick test mode for fast configuration checks
 
-## 🚀 Next Steps
-
-After setting up the APIs:
-
-1. **Test Integration**: Run the test command to verify everything works
-2. **Configure Celery**: Set up Redis and Celery workers for background processing
-3. **Set Up Database**: Configure PostgreSQL with pgvector for production
-4. **Monitor Performance**: Set up logging and monitoring for API calls
-5. **Scale Appropriately**: Monitor usage and upgrade API plans as needed
-
-## 📞 Support
-
-If you encounter issues:
-
-1. Check the Django logs: `python manage.py runserver --verbosity=2`
-2. Run the diagnostic command: `python manage.py test_apis --verbose`
-3. Review API provider documentation
-4. Check service status pages for outages
-
-## 📝 Example .env Configuration
-
-```bash
-# External API Keys
-OPENAI_API_KEY=sk-your-openai-api-key-here
-OPENAI_MODEL=gpt-4o-mini
-OPENAI_EMBEDDING_MODEL=text-embedding-3-small
-
-ADZUNA_APP_ID=your-app-id-here
-ADZUNA_API_KEY=your-api-key-here
-
-SKYVERN_API_KEY=your-skyvern-api-key-here
-SKYVERN_BASE_URL=https://api.skyvern.com
-
-# Database Configuration
-DB_NAME=jobraker_dev
-DB_USER=jobraker
-DB_PASSWORD=your_password_here
-DB_HOST=localhost
-DB_PORT=5432
-
-# Redis Configuration
-REDIS_URL=redis://localhost:6379/0
-CELERY_BROKER_URL=redis://localhost:6379/0
-CELERY_RESULT_BACKEND=redis://localhost:6379/0
-```
-
-Happy integrating! 🎉
+Need help? Check the logs at `logs/` directory or run the test command for detailed diagnostics.

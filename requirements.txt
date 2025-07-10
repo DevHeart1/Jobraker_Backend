@@ -69,9 +69,11 @@ isort>=5.12.0
 flake8>=6.0.0
 pre-commit>=3.3.0
 
-# Production Server
-gunicorn>=21.0.0
+# Production & Deployment
 whitenoise>=6.5.0
+gunicorn>=21.0.0
+sentry-sdk[django]>=1.32.0
+psutil>=5.9.0
 
 # WebSocket Support
 channels>=4.0.0
