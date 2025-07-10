@@ -48,62 +48,68 @@ def generate_user_profile_embedding_task(user_profile_id: str):
         logger.error(f"Error in generate_user_profile_embedding_task for id {user_profile_id}: {e}", exc_info=True)
 
 
-@shared_task
-def process_resume_task(user_profile_id: str):
+@shared_task(bind=True, max_retries=3)
+def process_resume_task(self, user_id: str):
     """
     Celery task to process an uploaded resume, extract information,
     and update the user's profile.
     """
+    User = apps.get_model('accounts', 'User')
     UserProfile = apps.get_model('accounts', 'UserProfile')
     try:
-        user_profile = UserProfile.objects.get(id=user_profile_id)
+        user = User.objects.get(id=user_id)
+        profile = UserProfile.objects.get(user=user)
         
-        if not user_profile.resume:
-            logger.error(f"No resume file found for UserProfile {user_profile_id} to process.")
+        if not profile.resume:
+            logger.error(f"No resume file found for UserProfile {profile.id} to process.")
             return
 
-        resume_path = user_profile.resume.path
+        resume_path = profile.resume.path
         resume_text = extract_text_from_resume(resume_path)
 
         if not resume_text:
-            logger.warning(f"Could not extract text from resume for UserProfile {user_profile_id}")
+            logger.warning(f"Could not extract text from resume for UserProfile {profile.id}")
+            # Optionally, update profile status to indicate failure
             return
 
         from apps.integrations.services.openai_service import OpenAIJobAssistant
         
         assistant = OpenAIJobAssistant()
-        
-        # This is a synchronous call within an async task.
-        # We will use a hypothetical direct analysis method in the assistant.
-        # In a real implementation, you would add a method to OpenAIJobAssistant
-        # that performs the analysis without queuing another Celery task.
-        
-        # Let's assume a method `_perform_direct_resume_analysis` exists for this purpose.
-        # This method would contain the logic from `analyze_openai_resume_task`.
-        
-        # For the purpose of this implementation, we will simulate the analysis result.
-        # In a real scenario, this would be the response from the OpenAI API.
-        
         analysis_result = assistant.analyze_resume(resume_text=resume_text)
 
         if analysis_result and analysis_result.get('success'):
             extracted_data = analysis_result.get('analysis', {})
             
-            if 'extracted_skills' in extracted_data:
-                user_profile.skills = list(set(user_profile.skills + extracted_data['extracted_skills']))
+            # Update profile fields based on extracted data
+            # Use set for skills to avoid duplicates
+            current_skills = set(profile.skills or [])
+            extracted_skills = set(extracted_data.get('extracted_skills', []))
+            profile.skills = sorted(list(current_skills.union(extracted_skills)))
             
-            if 'professional_summary' in extracted_data:
-                user_profile.bio = extracted_data['professional_summary']
+            if extracted_data.get('professional_summary'):
+                profile.bio = extracted_data['professional_summary']
+            
+            # Example of updating other fields
+            if extracted_data.get('current_job_title'):
+                profile.current_title = extracted_data['current_job_title']
 
-            user_profile.save()
-            logger.info(f"Successfully processed resume and updated profile for {user_profile_id}")
+            profile.save()
+            logger.info(f"Successfully processed resume and updated profile for user {user_id}")
 
-            generate_user_profile_embedding_task.delay(user_profile_id)
+            # After updating the profile with text, generate the new embedding
+            generate_user_profile_embedding_task.delay(user_profile_id=str(profile.id))
+        else:
+            error_msg = analysis_result.get('error', 'Unknown error during resume analysis.')
+            logger.error(f"Resume analysis failed for user {user_id}: {error_msg}")
+            # Optionally, add a note to the user's profile about the failure
 
+    except User.DoesNotExist:
+        logger.error(f"User with id {user_id} not found for resume processing.")
     except UserProfile.DoesNotExist:
-        logger.error(f"UserProfile with id {user_profile_id} not found for resume processing.")
+        logger.error(f"UserProfile for user id {user_id} not found for resume processing.")
     except Exception as e:
-        logger.error(f"Error in process_resume_task for id {user_profile_id}: {e}", exc_info=True)
+        logger.error(f"Error in process_resume_task for user id {user_id}: {e}", exc_info=True)
+        raise self.retry(exc=e, countdown=60 * 5)
 
 
 def extract_text_from_resume(file_path: str) -> str:

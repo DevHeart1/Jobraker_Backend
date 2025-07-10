@@ -252,7 +252,7 @@ class UserProfileViewSet(viewsets.ModelViewSet):
             400: {"description": "Invalid file or request."}
         }
     )
-    @action(detail=False, methods=['post'], url_path='upload-resume')
+    @action(detail=False, methods=['post'], url_path='upload-resume', parser_classes=[MultiPartParser])
     def upload_resume(self, request):
         """
         Handles resume file upload and queues it for processing.
@@ -271,7 +271,7 @@ class UserProfileViewSet(viewsets.ModelViewSet):
         profile.save()
 
         # Trigger Celery task for asynchronous processing
-        task = process_resume_task.delay(profile.id)
+        task = process_resume_task.delay(user_id=request.user.id)
         
         return Response(
             {"message": "Resume uploaded and queued for processing.", "task_id": task.id},

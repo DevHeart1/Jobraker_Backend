@@ -17,7 +17,7 @@ urlpatterns = [
     path('search/', views.JobSearchView.as_view(), name='job_search'),
     path('recommendations/', views.JobRecommendationsView.as_view(), name='job_recommendations'),
     path('recommendations/generate/', views.GenerateRecommendationsView.as_view(), name='generate_job_recommendations'),
-    path('auto-apply/', views.AutoApplyView.as_view(), name='auto_apply'),
+    path('jobs/<uuid:job_id>/auto-apply/', views.AutoApplyView.as_view(), name='auto_apply_job'),
     
     # Application management
     path('applications/bulk-apply/', views.BulkApplyView.as_view(), name='bulk_apply'),
