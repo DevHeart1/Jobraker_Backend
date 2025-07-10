@@ -242,6 +242,42 @@ class UserProfileViewSet(viewsets.ModelViewSet):
     def update(self, request, *args, **kwargs):
         return super().update(request, *args, **kwargs)
 
+    @extend_schema(
+        summary="Upload Resume",
+        description="Upload a resume for the user's profile.",
+        request={"type": "object", "properties": {"resume": {"type": "string", "format": "binary"}}},
+        tags=['User Profiles'],
+        responses={
+            202: {"description": "Resume upload accepted for processing."},
+            400: {"description": "Invalid file or request."}
+        }
+    )
+    @action(detail=False, methods=['post'], url_path='upload-resume')
+    def upload_resume(self, request):
+        """
+        Handles resume file upload and queues it for processing.
+        """
+        from .tasks import process_resume_task
+        from .serializers import ResumeUploadSerializer
+
+        serializer = ResumeUploadSerializer(data=request.data)
+        if not serializer.is_valid():
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+        profile, _ = UserProfile.objects.get_or_create(user=request.user)
+        
+        # Save the uploaded file to the profile's resume field
+        profile.resume = serializer.validated_data['resume']
+        profile.save()
+
+        # Trigger Celery task for asynchronous processing
+        task = process_resume_task.delay(profile.id)
+        
+        return Response(
+            {"message": "Resume uploaded and queued for processing.", "task_id": task.id},
+            status=status.HTTP_202_ACCEPTED
+        )
+
 
 @extend_schema(
     summary="Register new user",

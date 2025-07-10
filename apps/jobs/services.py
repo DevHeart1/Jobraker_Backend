@@ -245,6 +245,75 @@ class JobMatchService:
         logger.info(f"Calculated similarity score for UserProf {user_profile_id} and Job {job_id}: {scaled_score:.4f} (raw cosine: {similarity_score:.4f})")
         return round(scaled_score, 4)
 
+    def find_similar_jobs(
+        self,
+        job_id: Any,
+        top_n: int = 10
+    ) -> List[Dict[str, Any]]:
+        """
+        Finds relevant job listings similar to a given job based on its embedding.
+
+        Args:
+            job_id: The ID of the Job to find similarities for.
+            top_n: The maximum number of matching jobs to return.
+
+        Returns:
+            A list of dictionaries, each representing a matched job, including
+            the Job object and the similarity_score.
+        """
+        try:
+            job = Job.objects.get(id=job_id)
+            if not hasattr(job, 'combined_embedding') or not job.combined_embedding:
+                logger.warning(f"Job {job_id} has no embedding for similarity search.")
+                return []
+            job_embedding = job.combined_embedding
+        except Job.DoesNotExist:
+            logger.error(f"Job with id {job_id} not found for similarity search.")
+            return []
+
+        try:
+            filter_criteria = {'source_type': 'job_listing'}
+            
+            similar_job_documents = self.vector_db_service.search_similar_documents(
+                query_embedding=job_embedding,
+                top_n=top_n + 1,  # Fetch one extra to exclude the job itself
+                filter_criteria=filter_criteria
+            )
+        except Exception as e:
+            logger.error(f"Error searching similar job documents in VectorDBService for job {job_id}: {e}")
+            return []
+
+        matched_jobs_output = []
+        if not similar_job_documents:
+            return []
+
+        job_ids_to_fetch = [doc.get('source_id') for doc in similar_job_documents if doc.get('source_id') and str(doc.get('source_id')) != str(job_id)]
+        
+        if not job_ids_to_fetch:
+            return []
+
+        score_map = {doc.get('source_id'): doc.get('similarity_score', 0.0) for doc in similar_job_documents}
+
+        try:
+            jobs = Job.objects.filter(id__in=job_ids_to_fetch, status='active')
+
+            for j in jobs:
+                job_id_str = str(j.id)
+                if job_id_str in score_map:
+                    matched_jobs_output.append({
+                        'job': j,
+                        'score': score_map[job_id_str]
+                    })
+            
+            matched_jobs_output.sort(key=lambda x: x['score'], reverse=True)
+            logger.info(f"Successfully matched {len(matched_jobs_output)} similar jobs for job {job_id}.")
+
+        except Exception as e:
+            logger.error(f"Error fetching full Job objects for similarity matching: {e}")
+            return []
+
+        return matched_jobs_output[:top_n]
+
     def generate_recommendations_for_user(
         self,
         user_profile_id: Any,

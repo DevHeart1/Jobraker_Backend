@@ -179,6 +179,44 @@ class JobViewSet(viewsets.ModelViewSet):
         return queryset.order_by('-posted_date')
 
     @extend_schema(
+        summary="Find Similar Jobs",
+        description="Find jobs similar to the specified job using vector embeddings.",
+        tags=['Jobs', 'Recommendations'],
+        parameters=[
+            OpenApiParameter(
+                name='top_n',
+                description='Number of similar jobs to return.',
+                required=False,
+                type=OpenApiTypes.INT,
+                default=10
+            )
+        ],
+        responses={
+            200: JobListSerializer(many=True),
+            404: ErrorResponseSerializer
+        }
+    )
+    @action(detail=True, methods=['get'], url_path='similar')
+    def similar(self, request, pk=None):
+        """
+        Find and return jobs similar to the current job.
+        """
+        try:
+            job = self.get_object()
+        except Job.DoesNotExist:
+            return Response({"error": "Job not found."}, status=status.HTTP_404_NOT_FOUND)
+
+        top_n = int(request.query_params.get('top_n', 10))
+        
+        service = JobMatchService()
+        similar_jobs_data = service.find_similar_jobs(job_id=job.id, top_n=top_n)
+
+        similar_jobs = [item['job'] for item in similar_jobs_data]
+
+        serializer = JobListSerializer(similar_jobs, many=True, context={'request': request})
+        return Response(serializer.data)
+
+    @extend_schema(
         summary="Generate Interview Questions",
         description="Queues a task to generate interview questions for this specific job.",
         tags=['Jobs', 'AI'],
@@ -718,25 +756,56 @@ class AutoApplyView(APIView):
         
         Validates user readiness and queues jobs for automated application.
         """
-        job_ids = request.data.get('job_ids', [])
-        
-        if not job_ids:
+        from apps.integrations.tasks import run_skyvern_application_task
+        from apps.accounts.models import UserProfile
+
+        serializer = BulkApplySerializer(data=request.data)
+        if not serializer.is_valid():
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+        job_ids = serializer.validated_data['job_ids']
+        user = request.user
+
+        try:
+            profile = user.profile
+        except UserProfile.DoesNotExist:
             return Response(
-                {'error': 'No job IDs provided'}, 
+                {"error": "User profile not found. A complete profile with a resume is required for auto-apply."},
                 status=status.HTTP_400_BAD_REQUEST
             )
-        
-        # TODO: Implement auto-apply using Skyvern
-        # This would:
-        # 1. Validate user has complete profile and resume
-        # 2. Queue jobs for automated application
-        # 3. Use Skyvern to fill out application forms
-        # 4. Track application status
+
+        if not profile.resume:
+            return Response(
+                {"error": "Resume not found in profile. Please upload a resume before using auto-apply."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        queued_jobs = []
+        for job_id in job_ids:
+            try:
+                job = Job.objects.get(id=job_id, status='active')
+                
+                # Optional: Check if already applied through Jobraker
+                if Application.objects.filter(user=user, job=job).exists():
+                    logger.warning(f"User {user.id} attempting to auto-apply to already applied job {job.id}. Skipping.")
+                    continue
+
+                # Queue the Skyvern task
+                task = run_skyvern_application_task.delay(
+                    user_id=str(user.id),
+                    job_id=str(job.id)
+                )
+                queued_jobs.append({"job_id": str(job.id), "task_id": task.id})
+                logger.info(f"Queued Skyvern application task {task.id} for user {user.id} and job {job.id}")
+
+            except Job.DoesNotExist:
+                logger.warning(f"Auto-apply requested for non-existent or inactive job_id: {job_id}")
+                continue
         
         return Response({
-            'message': 'Auto-apply feature coming soon',
-            'queued_jobs': len(job_ids)
-        })
+            'message': f'Auto-apply process started for {len(queued_jobs)} jobs.',
+            'queued_jobs': queued_jobs
+        }, status=status.HTTP_202_ACCEPTED)
 
 
 @extend_schema(
@@ -1016,7 +1085,7 @@ class JobAlertViewSet(viewsets.ModelViewSet):
                     "matching_jobs": 15,
                     "sample_jobs": [
                         {
-                            "id": "550e8400-e29b-41d4-a716-446655440000",
+                            "id": "550e8400-e29b-41a716-446655440000",
                             "title": "Senior Python Developer",
                             "company": "TechCorp Inc.",
                             "location": "San Francisco, CA",
