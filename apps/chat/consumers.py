@@ -89,212 +89,141 @@ class ChatConsumer(AsyncWebsocketConsumer):
             await self.send_error('Message content required')
             return
         
-        # Save message to database
-        message = await self.save_message(user, message_content)
-        
-        if message:
-            # Send message to room group
-            await self.channel_layer.group_send(
-                self.room_group_name,
-                {
-                    'type': 'chat_message',
-                    'message': {
-                        'id': message.id,
-                        'content': message.content,
-                        'sender': 'user',
-                        'timestamp': message.created_at.isoformat(),
-                        'user_id': user.id
-                    }
-                }
-            )
-            
-            # Generate AI response
-            await self.generate_ai_response(message)
-    
+        # Save user message to database
+        await self.save_message(user, message_content, 'user')
+
+        # Trigger AI response generation via Celery task
+        from apps.integrations.tasks import get_openai_chat_response_task
+        get_openai_chat_response_task.delay(
+            user_id=str(user.id),
+            session_id=self.session_id,
+            message=message_content
+        )
+
+        # Send the user's message back to the group immediately
+        await self.channel_layer.group_send(
+            self.room_group_name,
+            {
+                'type': 'chat_message',
+                'message': message_content,
+                'sender': user.username,
+                'sender_type': 'user'
+            }
+        )
+
     async def handle_typing_indicator(self, data):
         """
-        Handle typing indicators.
+        Handle typing indicators from users.
         """
         user = self.scope.get('user')
         if isinstance(user, AnonymousUser):
-            return
-        
-        is_typing = data.get('is_typing', False)
-        
-        # Send typing indicator to room group
+            return # Ignore typing from anonymous users
+
         await self.channel_layer.group_send(
             self.room_group_name,
             {
                 'type': 'typing_indicator',
-                'is_typing': is_typing,
-                'user_id': user.id
+                'user': user.username,
+                'is_typing': data.get('is_typing', False)
             }
         )
-    
+
     async def handle_mark_read(self, data):
         """
-        Handle mark messages as read.
+        Handle marking messages as read.
         """
         user = self.scope.get('user')
         if isinstance(user, AnonymousUser):
             return
-        
+
         message_id = data.get('message_id')
         if message_id:
-            await self.mark_message_read(message_id)
-    
-    async def generate_ai_response(self, user_message):
+            await self.mark_message_as_read(user, message_id)
+
+    @database_sync_to_async
+    def save_message(self, user, content, sender_type):
         """
-        Generate AI response to user message.
+        Save a chat message to the database.
         """
         try:
-            # Get session history
-            session = await self.get_session()
-            if not session:
-                return
-            
-            # Get recent messages for context
-            messages = await self.get_recent_messages(session)
-            
-            # Generate AI response
-            openai_service = OpenAIService()
-            ai_response = await database_sync_to_async(
-                openai_service.generate_chat_response
-            )(messages, session.user)
-            
-            if ai_response:
-                # Save AI response to database
-                ai_message = await self.save_ai_message(ai_response)
-                
-                if ai_message:
-                    # Send AI response to room group
-                    await self.channel_layer.group_send(
-                        self.room_group_name,
-                        {
-                            'type': 'chat_message',
-                            'message': {
-                                'id': ai_message.id,
-                                'content': ai_message.content,
-                                'sender': 'assistant',
-                                'timestamp': ai_message.created_at.isoformat(),
-                                'user_id': None
-                            }
-                        }
-                    )
-        
+            session = ChatSession.objects.get(id=self.session_id)
+            # Ensure the user is part of the session
+            if user not in session.participants.all():
+                logger.warning(f"User {user.id} not in session {self.session_id}. Adding.")
+                session.participants.add(user)
+
+            message = ChatMessage.objects.create(
+                session=session,
+                sender=user,
+                content=content,
+                sender_type=sender_type
+            )
+            return message
+        except ChatSession.DoesNotExist:
+            logger.error(f"Chat session not found: {self.session_id}")
+            return None
         except Exception as e:
-            logger.error(f"Error generating AI response: {e}")
-            await self.send_error('Failed to generate AI response')
-    
+            logger.error(f"Error saving message for session {self.session_id}: {e}")
+            return None
+
+    @database_sync_to_async
+    def mark_message_as_read(self, user, message_id):
+        """
+        Mark a specific message as read by the user.
+        (This is a placeholder for a more complex read-status implementation)
+        """
+        try:
+            message = ChatMessage.objects.get(id=message_id)
+            # In a real system, you'd have a ManyToManyField for read receipts
+            logger.info(f"User {user.username} marked message {message_id} as read.")
+        except ChatMessage.DoesNotExist:
+            logger.warning(f"Could not mark message as read, not found: {message_id}")
+
+    # --- Handlers for messages from the channel layer ---
+
     async def chat_message(self, event):
         """
-        Called when we receive a message from the room group.
+        Receive a message from the room group and send it to the WebSocket.
+        This is now used for both user messages and AI responses.
         """
         await self.send(text_data=json.dumps({
             'type': 'message',
-            'message': event['message']
+            'message': event['message'],
+            'sender': event.get('sender', 'AI Assistant'),
+            'sender_type': event.get('sender_type', 'ai')
         }))
-    
+
     async def typing_indicator(self, event):
         """
-        Called when we receive a typing indicator from the room group.
+        Receive a typing indicator from the group and forward it.
         """
         await self.send(text_data=json.dumps({
             'type': 'typing',
-            'is_typing': event['is_typing'],
-            'user_id': event['user_id']
+            'user': event['user'],
+            'is_typing': event['is_typing']
         }))
     
+    async def ai_response(self, event):
+        """
+        Handler for when an AI response is ready from the Celery task.
+        The task will send a message to this group.
+        """
+        await self.send(text_data=json.dumps({
+            'type': 'message',
+            'message': event['response'],
+            'sender': 'AI Assistant',
+            'sender_type': 'ai',
+            'model_used': event.get('model_used')
+        }))
+
     async def send_error(self, message):
         """
-        Send error message to client.
+        Send an error message to the client.
         """
         await self.send(text_data=json.dumps({
             'type': 'error',
             'message': message
         }))
-    
-    @database_sync_to_async
-    def get_session(self):
-        """
-        Get or create chat session.
-        """
-        try:
-            user = self.scope.get('user')
-            if isinstance(user, AnonymousUser):
-                return None
-            
-            session, created = ChatSession.objects.get_or_create(
-                id=self.session_id,
-                defaults={'user': user}
-            )
-            return session
-        except Exception as e:
-            logger.error(f"Error getting session: {e}")
-            return None
-    
-    @database_sync_to_async
-    def save_message(self, user, content):
-        """
-        Save user message to database.
-        """
-        try:
-            session = ChatSession.objects.get(id=self.session_id)
-            message = ChatMessage.objects.create(
-                session=session,
-                content=content,
-                sender='user'
-            )
-            return message
-        except Exception as e:
-            logger.error(f"Error saving message: {e}")
-            return None
-    
-    @database_sync_to_async
-    def save_ai_message(self, content):
-        """
-        Save AI message to database.
-        """
-        try:
-            session = ChatSession.objects.get(id=self.session_id)
-            message = ChatMessage.objects.create(
-                session=session,
-                content=content,
-                sender='assistant'
-            )
-            return message
-        except Exception as e:
-            logger.error(f"Error saving AI message: {e}")
-            return None
-    
-    @database_sync_to_async
-    def get_recent_messages(self, session, limit=10):
-        """
-        Get recent messages for context.
-        """
-        try:
-            messages = ChatMessage.objects.filter(
-                session=session
-            ).order_by('-created_at')[:limit]
-            
-            return [{
-                'content': msg.content,
-                'sender': msg.sender,
-                'timestamp': msg.created_at.isoformat()
-            } for msg in reversed(messages)]
-        except Exception as e:
-            logger.error(f"Error getting recent messages: {e}")
-            return []
-    
-    @database_sync_to_async
-    def mark_message_read(self, message_id):
-        """
-        Mark message as read.
-        """
-        try:
-            ChatMessage.objects.filter(id=message_id).update(is_read=True)
-        except Exception as e:
-            logger.error(f"Error marking message as read: {e}")
 
 
 class NotificationConsumer(AsyncWebsocketConsumer):

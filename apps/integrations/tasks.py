@@ -670,25 +670,25 @@ def get_openai_chat_response_task(self, user_id: int, session_id: int, message: 
         rag_context_str = ""
         if message: # Use the user's message for RAG query
             try:
-                from apps.integrations.services.openai import EmbeddingService # Consolidated
-                from apps.common.services import VectorDBService # Using actual service path
+                from apps.integrations.services.openai_service import EmbeddingService
+                from apps.common.services import VectorDBService
 
                 embedding_service = EmbeddingService()
-                vdb_service = VectorDBService() # Service with implemented ORM logic
+                vdb_service = VectorDBService()
 
                 query_embedding_list = embedding_service.generate_embeddings([message])
                 if query_embedding_list and query_embedding_list[0]:
                     query_embedding = query_embedding_list[0]
+                    
+                    # Generic filter for knowledge articles and potentially relevant job listings
+                    rag_filter = {
+                        "$or": [
+                            {"source_type": {"$eq": "knowledge_article"}},
+                            {"source_type": {"$eq": "job_listing"}}
+                        ]
+                    }
 
-                    # For chat, a generic search might be okay, or we can add simple keyword-based filters.
-                    # Example: if user asks about "jobs" or "roles", prioritize 'job_listing' source_type.
-                    rag_filter = None
-                    if "job" in message.lower() or "role" in message.lower() or "position" in message.lower():
-                        rag_filter = {'source_type': 'job_listing'}
-                    elif "interview" in message.lower() or "resume" in message.lower():
-                        rag_filter = {'source_type__in': ['career_article', 'faq_item']}
-
-                    logger.info(f"RAG: Searching documents for chat message with filter: {rag_filter}")
+                    logger.info(f"RAG (Chat): Searching documents with filter: {rag_filter}")
                     similar_docs = vdb_service.search_similar_documents(
                         query_embedding=query_embedding,
                         top_n=3,
@@ -696,764 +696,211 @@ def get_openai_chat_response_task(self, user_id: int, session_id: int, message: 
                     )
 
                     if similar_docs:
-                        rag_context_parts = ["--- Start of Retrieved Context ---"]
-                        for i, doc in enumerate(similar_docs):
-                            doc_info = (
-                                f"Retrieved Context Item {i+1} "
-                                f"(Source Type: {doc.get('source_type', 'N/A')}, "
-                                f"Source ID: {doc.get('source_id', 'N/A')}, "
-                                f"Similarity: {doc.get('similarity_score', 0.0):.3f}):"
-                            )
-                            rag_context_parts.append(f"{doc_info}\n{doc.get('text_content', '')}")
-                        rag_context_parts.append("--- End of Retrieved Context ---")
-                        rag_context_str = "\n\n".join(rag_context_parts)
-                        logger.info(f"RAG: Retrieved and formatted {len(similar_docs)} documents for chat task using functional VectorDBService.")
+                        rag_context_str = "\n\nRetrieved Information:\n" + "\n".join([f"- {doc['text_content']}" for doc in similar_docs])
+                        logger.info(f"RAG (Chat): Found {len(similar_docs)} relevant documents for session {session_id}.")
                     else:
-                        logger.info("RAG: No similar documents found for chat task.")
+                        logger.info(f"RAG (Chat): No relevant documents found for session {session_id}.")
                 else:
-                    logger.warning("RAG: Could not generate query embedding for chat task.")
+                    logger.warning(f"RAG (Chat): Could not generate query embedding for session {session_id}.")
             except Exception as e:
-                logger.error(f"RAG pipeline error in get_openai_chat_response_task: {e}")
+                logger.error(f"RAG pipeline error in get_openai_chat_response_task for session {session_id}: {e}")
         # --- End RAG Implementation ---
 
-        # Refined system prompt building
-        user_profile_context = "Not specified."
-        if user_profile_data:
-            user_profile_context = f"Experience: {user_profile_data.get('experience_level', 'N/A')}, Skills: {', '.join(user_profile_data.get('skills', []))}."
-
-        system_prompt_parts = [
-            f"You are Jobraker AI, a helpful and friendly job search assistant.",
-            f"User Profile Context: {user_profile_context}",
-            "Always aim to be encouraging and provide actionable steps or information.",
-            "Keep your responses conversational but professional."
-        ]
+        # Build conversation history for OpenAI API
+        history = conversation_history or []
+        
+        # System message setup
+        system_message_content = """You are Jobraker's AI Assistant, a friendly and expert career advisor.
+Your goal is to help users with their job search, providing advice, finding jobs, and answering questions.
+If you are provided with 'Retrieved Information', prioritize using it to answer the user's query, but also use your general knowledge.
+Synthesize information rather than just copying from the retrieved documents.
+If the retrieved information is not relevant, rely on your general expertise."""
+        
+        messages_for_api = [{"role": "system", "content": system_message_content}]
+        messages_for_api.extend(history)
+        
+        # Add the current user message, potentially with RAG context
+        user_content_prompt = message
         if rag_context_str:
-            system_prompt_parts.append(f"\nUse the following retrieved context to inform your response if it's relevant to the user's message. Synthesize it with your general knowledge and do not simply repeat it:")
-            system_prompt_parts.append(rag_context_str)
-        else:
-            system_prompt_parts.append("\nAnswer the user's questions based on your general knowledge and the conversation history.")
-
-        final_system_prompt = "\n".join(system_prompt_parts)
-
-        messages_payload = [{"role": "system", "content": final_system_prompt}]
-        if conversation_history:
-            messages_payload.extend(conversation_history[-10:])
-        messages_payload.append({"role": "user", "content": message})
-
-        if not api_key:
-            logger.warning(f"OpenAI API key not configured for task: get_openai_chat_response_task for user {user_id}")
-            return {'response': "Mock chat response due to no API key.", 'model_used': 'mock_task', 'success': True}
-
-        # Moderation (simplified for task, ideally a utility function)
-        OPENAI_MODERATION_CHECKS_TOTAL.labels(target='user_input').inc()
-        mod_start_time = time.monotonic()
-        # Use client instance for moderation
-        mod_response = client.moderations.create(input=message)
-        OPENAI_API_CALL_DURATION_SECONDS.labels(type='moderation', model='text-moderation-latest').observe(time.monotonic() - mod_start_time)
-        OPENAI_API_CALLS_TOTAL.labels(type='moderation', model='text-moderation-latest', status='success').inc() # Assuming mod call itself succeeds
-
-        if mod_response.results[0].flagged:
-            OPENAI_MODERATION_FLAGGED_TOTAL.labels(target='user_input').inc()
-            logger.warning(f"User message flagged in task: get_openai_chat_response_task for user {user_id}, session {session_id}") # Added session_id to log
-            return {'response': "Input violates guidelines.", 'model_used': 'moderation_filter', 'success': False, 'error': 'flagged_input'}
-
-        # No need to set openai.api_key globally if client instance is used
+            user_content_prompt += f"\n\n--- Context for your answer ---\n{rag_context_str}"
+        messages_for_api.append({"role": "user", "content": user_content_prompt})
 
         start_time = time.monotonic()
-        api_call_status = 'error' # Renamed to avoid conflict with task status for metrics
-        ai_response_text = "" # Initialize
+        api_status = 'error'
+        ai_response_text = "An error occurred while processing your request."
         try:
-            # Simplified: Not including function calling logic directly in task for this refactor stage to keep it focused.
-            # Use client instance for chat completion
             response = client.chat.completions.create(
                 model=model,
-                messages=messages_payload,
-                max_tokens=800,
-                temperature=0.7
+                messages=messages_for_api,
+                max_tokens=1500,
+                temperature=0.7,
             )
             ai_response_text = response.choices[0].message.content.strip()
-            api_call_status = 'success'
+            api_status = 'success'
+            
+            # Save the AI's response to the database
+            ChatMessage.objects.create(
+                session_id=session_id,
+                sender_type='ai',
+                content=ai_response_text
+            )
+            logger.info(f"Successfully generated and saved AI chat response for session {session_id}")
+
+            return {'response': ai_response_text, 'model_used': model, 'success': True}
+
         except Exception as e:
-            logger.error(f"OpenAI API call failed in get_openai_chat_response_task: {e}")
-            # OPENAI_API_CALLS_TOTAL is updated in finally block
-            raise # Re-raise to trigger Celery retry
+            logger.error(f"OpenAI API call failed in get_openai_chat_response_task for session {session_id}: {e}")
+            # Save an error message to the chat
+            ChatMessage.objects.create(
+                session_id=session_id,
+                sender_type='ai',
+                content="I'm sorry, but I encountered an error and couldn't generate a response. Please try again."
+            )
+            raise self.retry(exc=e, countdown=30 * (2 ** self.request.retries))
         finally:
             duration = time.monotonic() - start_time
             OPENAI_API_CALL_DURATION_SECONDS.labels(type='chat', model=model).observe(duration)
-            OPENAI_API_CALLS_TOTAL.labels(type='chat', model=model, status=api_call_status).inc()
+            OPENAI_API_CALLS_TOTAL.labels(type='chat', model=model, status=api_status).inc()
 
-
-        # Moderation of AI output (simplified)
-        OPENAI_MODERATION_CHECKS_TOTAL.labels(target='ai_output').inc()
-        mod_ai_start_time = time.monotonic()
-        # Use client instance for moderation
-        mod_response_ai = client.moderations.create(input=ai_response_text)
-        OPENAI_API_CALL_DURATION_SECONDS.labels(type='moderation', model='text-moderation-latest').observe(time.monotonic() - mod_ai_start_time)
-        OPENAI_API_CALLS_TOTAL.labels(type='moderation', model='text-moderation-latest', status='success').inc()
-
-        if mod_response_ai.results[0].flagged:
-            OPENAI_MODERATION_FLAGGED_TOTAL.labels(target='ai_output').inc()
-            logger.warning(f"AI response flagged in task: get_openai_chat_response_task for user {user_id}, session {session_id}")
-            # Even if flagged, we might want to save a placeholder or the flagged message with a note.
-            # For now, let's follow the pattern of returning an error status.
-            # The actual saving of a "flagged response" message is not done here yet.
-            return {'response': "AI output violates content guidelines and was not saved.", 'model_used': 'moderation_filter', 'success': False, 'error': 'flagged_ai_output_not_saved'}
-
-        # Save the AI message to the chat session (only if not flagged)
-        try:
-            chat_session = ChatSession.objects.get(id=session_id)
-            ChatMessage.objects.create(
-                session=chat_session,
-                sender='ai',
-                message_text=ai_response_text # Use the variable that holds the text
-            )
-            chat_session.save(update_fields=['updated_at'])
-            logger.info(f"Successfully saved AI response for session {session_id}")
-        except ChatSession.DoesNotExist:
-            logger.error(f"ChatSession with id {session_id} not found. Cannot save AI message.")
-            return {'response': ai_response_text, 'model_used': model, 'success': True, 'error': 'session_not_found_for_saving_message', 'message_saved': False}
-        except Exception as e_save:
-            logger.error(f"Failed to save AI message for session {session_id}: {e_save}")
-            return {'response': ai_response_text, 'model_used': model, 'success': True, 'error': f'message_save_failed: {str(e_save)}', 'message_saved': False}
-
-        return {
-            'response': ai_response_text,
-            'model_used': model,
-            'success': True,
-            'message_saved': True
-        }
-    except Exception as exc: # Outer try-except for Celery retry logic
+    except ChatSession.DoesNotExist:
+        logger.error(f"Chat session not found: {session_id}")
+        return {'response': "Chat session not found.", 'success': False, 'error': 'session_not_found'}
+    except Exception as exc:
         logger.error(f"Error in get_openai_chat_response_task for user {user_id}, session {session_id}: {exc}")
-        raise self.retry(exc=exc, countdown=30 * (2 ** self.request.retries))
-
-
-@shared_task(bind=True, max_retries=2)
-def analyze_openai_resume_task(self, resume_text: str, target_job: str = "", user_profile_data: dict = None):
-    """Celery task for OpenAIJobAssistant resume analysis. Includes core logic."""
-    try:
-        from django.conf import settings
-        import openai
-
-        api_key = getattr(settings, 'OPENAI_API_KEY', '')
-        model = getattr(settings, 'OPENAI_MODEL', 'gpt-4')
-
-        # --- RAG Implementation for Resume Analysis ---
-        rag_context_str = ""
-        if target_job: # Only fetch RAG context if a target job is specified
-            try:
-                from apps.integrations.services.openai import EmbeddingService # Consolidated
-                from apps.common.services import VectorDBService
-
-                embedding_service = EmbeddingService()
-                vdb_service = VectorDBService()
-
-                # Embed the target_job description (or a summary/keywords from it)
-                # For simplicity, embedding the whole target_job string if it's mostly a description.
-                query_embedding_list = embedding_service.generate_embeddings([target_job])
-
-                if query_embedding_list and query_embedding_list[0]:
-                    query_embedding = query_embedding_list[0]
-
-                    # Search for KnowledgeArticles related to resume writing or general career advice
-                    rag_filter = {'source_type__in': ['career_advice', 'faq_item', 'interview_tips'],
-                                  'metadata__category__icontains': 'resume'} # Example filter
-                    # Or search for articles tagged with 'resume' or 'cv'
-                    # rag_filter = {'metadata__tags__overlap': ['resume', 'cv_writing']}
-
-                    logger.info(f"RAG (ResumeAnalysis): Searching documents with filter: {rag_filter}")
-                    similar_docs = vdb_service.search_similar_documents(
-                        query_embedding=query_embedding,
-                        top_n=2, # Fetch 1-2 relevant advice articles
-                        filter_criteria=rag_filter
-                    )
-
-                    if similar_docs:
-                        rag_context_parts = ["--- Start: Relevant Resume Writing Advice ---"]
-                        for i, doc in enumerate(similar_docs):
-                            doc_info = (
-                                f"Advice Article {i+1} "
-                                f"(Source: {doc.get('source_type', 'N/A')}, "
-                                f"Similarity to target job: {doc.get('similarity_score', 0.0):.3f}):"
-                            )
-                            rag_context_parts.append(f"{doc_info}\n{doc.get('text_content', '')}")
-                        rag_context_parts.append("--- End: Relevant Resume Writing Advice ---")
-                        rag_context_str = "\n\n".join(rag_context_parts)
-                        logger.info(f"RAG (ResumeAnalysis): Retrieved {len(similar_docs)} advice articles.")
-                    else:
-                        logger.info("RAG (ResumeAnalysis): No relevant advice articles found.")
-                else:
-                    logger.warning("RAG (ResumeAnalysis): Could not generate query embedding for target_job.")
-            except Exception as e:
-                logger.error(f"RAG pipeline error in analyze_openai_resume_task: {e}")
-        # --- End RAG Implementation ---
-
-        # Refined prompt building
-        prompt_parts = [
-            "Please analyze the following resume and provide specific improvement suggestions.",
-            f"\nResume Content:\n---\n{resume_text}\n---"
-        ]
-        if target_job:
-            prompt_parts.append(f"\nThe resume is being tailored for the following Target Job (or job type):\n---\n{target_job}\n---")
-        if user_profile_data: # Add user profile context if available
-            user_exp = user_profile_data.get('experience_level', 'N/A')
-            user_skills = ", ".join(user_profile_data.get('skills', [])) or "N/A"
-            prompt_parts.append(f"\nUser Profile Context: Experience Level: {user_exp}, Skills: {user_skills}.")
-
-        if rag_context_str:
-            prompt_parts.append(f"\nConsider the following general resume advice when formulating your feedback, if relevant:")
-            prompt_parts.append(rag_context_str)
-
-        prompt_parts.append(f"""
-Please structure your feedback to include:
-1. Overall Assessment and Key Strengths: (General impression and what the resume does well)
-2. Specific Areas for Improvement related to the Resume Content: (Actionable feedback on sections, wording, impact statements)
-3. Tailoring for Target Job (if specified): (How to better align with the target job description/type)
-4. Missing Skills or Experience to Highlight (if applicable based on target job):
-5. Formatting and Structure Suggestions: (Readability, ATS compatibility)
-6. Keyword Optimization: (Suggestions for incorporating relevant keywords, especially for ATS)""")
-
-        prompt = "\n\n".join(prompt_parts)
-
-        if not api_key:
-            logger.warning("OpenAI API key not configured for task: analyze_openai_resume_task")
-            return {'analysis': "Mock resume analysis due to no API key.", 'model_used': 'mock_task', 'success': True}
-
-        start_time = time.monotonic()
-        status = 'error'
-        try:
-            from openai import OpenAI
-            client = OpenAI(api_key=api_key)
-            
-            response = client.chat.completions.create(
-                model=model,
-                messages=[
-                    {"role": "system", "content": "You are an expert resume reviewer."},
-                    {"role": "user", "content": prompt}
-                ],
-                max_tokens=1200,
-                temperature=0.7
-            )
-            analysis = response.choices[0].message.content.strip()
-            status = 'success'
-            return {
-                'analysis': analysis,
-                'target_job': target_job,
-                'model_used': model,
-                'success': True
-            }
-        except Exception as e:
-            logger.error(f"OpenAI API call failed in analyze_openai_resume_task: {e}")
-            raise # Re-raise to trigger Celery retry
-        finally:
-            duration = time.monotonic() - start_time
-            OPENAI_API_CALL_DURATION_SECONDS.labels(type='resume_analysis', model=model).observe(duration)
-            OPENAI_API_CALLS_TOTAL.labels(type='resume_analysis', model=model, status=status).inc()
-
-    except Exception as exc: # Outer try-except for Celery retry logic
-        logger.error(f"Error in analyze_openai_resume_task: {exc}")
-        raise self.retry(exc=exc, countdown=30 * (2 ** self.request.retries))
-
-# --- Ensure existing OpenAI tasks correctly call service methods if they are also to be made async ---
-# generate_job_embeddings, generate_user_profile_embeddings, analyze_job_match_for_user,
-# and generate_cover_letter_for_application already call the respective service methods.
-# If those service methods are changed to be async launchers, these tasks become the actual workers.
-# No change needed here for those existing tasks, but the service methods they call will be changed.
-
-# It's harder to get token counts consistently without parsing responses carefully,
-# so omitting token metrics for now unless the library exposes them easily.
-# --- End Prometheus Metrics ---
-
-
-# =======================
-# CRITICAL MISSING TASKS
-# =======================
-
-@shared_task(bind=True, max_retries=3)
-def automated_daily_job_sync(self):
-    """
-    Daily automated job synchronization from all sources.
-    This is the main job that runs daily to fetch new jobs.
-    """
-    try:
-        logger.info("Starting daily automated job sync")
-        
-        # 1. Fetch from Adzuna API
-        adzuna_stats = fetch_adzuna_jobs.delay([
-            'software', 'engineering', 'data', 'product', 'marketing', 
-            'sales', 'finance', 'operations', 'design', 'hr'
-        ], max_days_old=1)
-        
-        # 2. Clean up old jobs (older than 30 days)
-        cleanup_stats = cleanup_old_jobs.delay(days_old=30)
-        
-        # 3. Update job statistics
-        update_job_statistics.delay()
-        
-        logger.info("Daily job sync tasks queued successfully")
-        return {
-            'status': 'success',
-            'adzuna_task_id': adzuna_stats.id,
-            'cleanup_task_id': cleanup_stats.id,
-            'timestamp': timezone.now().isoformat()
-        }
-        
-    except Exception as exc:
-        logger.error(f"Error in daily job sync: {exc}")
-        raise self.retry(exc=exc, countdown=300)  # 5 minute retry
+        # Don't retry if it's not an API error, just log it.
+        if not self.request.retries: # Avoid retrying non-API errors repeatedly
+             return {'response': "A critical error occurred.", 'success': False, 'error': str(exc)}
+        raise
 
 
 @shared_task(bind=True, max_retries=3)
-def cleanup_old_jobs(self, days_old=30):
+def submit_job_application_with_skyvern(self, user_id: str, job_id: str, application_id: str):
     """
-    Clean up old job postings to keep database manageable.
-    """
-    try:
-        from apps.jobs.models import Job
-        
-        cutoff_date = timezone.now() - timedelta(days=days_old)
-        
-        # Mark old jobs as inactive instead of deleting
-        updated_count = Job.objects.filter(
-            created_at__lt=cutoff_date,
-            is_active=True
-        ).update(is_active=False)
-        
-        logger.info(f"Marked {updated_count} old jobs as inactive")
-        return {'cleaned_jobs': updated_count}
-        
-    except Exception as exc:
-        logger.error(f"Error cleaning up old jobs: {exc}")
-        raise self.retry(exc=exc, countdown=300)
-
-
-@shared_task(bind=True, max_retries=3)
-def update_job_statistics(self):
-    """
-    Update job market statistics and trends.
-    """
-    try:
-        from apps.jobs.models import Job
-        from django.db.models import Count, Avg
-        
-        # Calculate statistics
-        stats = {
-            'total_active_jobs': Job.objects.filter(is_active=True).count(),
-            'jobs_by_type': dict(Job.objects.filter(is_active=True)
-                                .values('job_type')
-                                .annotate(count=Count('id'))),
-            'avg_salary': Job.objects.filter(
-                is_active=True, 
-                salary_min__isnull=False
-            ).aggregate(avg=Avg('salary_min'))['avg'],
-            'updated_at': timezone.now().isoformat()
-        }
-        
-        # Could store in cache or dedicated statistics table
-        from django.core.cache import cache
-        cache.set('job_market_stats', stats, timeout=86400)  # 24 hours
-        
-        logger.info(f"Updated job statistics: {stats['total_active_jobs']} active jobs")
-        return stats
-        
-    except Exception as exc:
-        logger.error(f"Error updating job statistics: {exc}")
-        raise self.retry(exc=exc, countdown=300)
-
-
-@shared_task(bind=True, max_retries=3)
-def intelligent_job_matching(self, user_id):
-    """
-    AI-powered job matching for a specific user.
-    Generates personalized job recommendations.
-    """
-    try:
-        from apps.jobs.models import Job, RecommendedJob
-        from apps.integrations.services.openai import EmbeddingService
-        from apps.common.services import VectorDBService
-        
-        user = User.objects.get(id=user_id)
-        profile = getattr(user, 'profile', None)
-        
-        if not profile:
-            logger.warning(f"User {user_id} has no profile for job matching")
-            return {'status': 'no_profile'}
-        
-        # Generate user profile embedding if not exists
-        if not profile.profile_embedding:
-            generate_user_profile_embeddings.delay(user_id)
-            logger.info(f"Queued profile embedding generation for user {user_id}")
-            return {'status': 'embedding_queued'}
-        
-        # Use vector search to find similar jobs
-        vector_db_service = VectorDBService()
-        embedding_service = EmbeddingService()
-        
-        # Create search query from user profile
-        search_text = f"Job seeker with skills: {profile.skills}, experience: {profile.experience_level}, interests: {profile.bio}"
-        
-        # Get job recommendations
-        similar_jobs = vector_db_service.search_similar_documents(
-            query_text=search_text,
-            source_type='job_listing',
-            limit=20
-        )
-        
-        # Process recommendations
-        recommendations_created = 0
-        for job_match in similar_jobs:
-            try:
-                job_id = job_match.get('metadata', {}).get('job_id_original')
-                if job_id:
-                    job = Job.objects.get(id=job_id, is_active=True)
-                    
-                    # Create or update recommendation
-                    recommendation, created = RecommendedJob.objects.get_or_create(
-                        user=user,
-                        job=job,
-                        defaults={
-                            'match_score': job_match.get('similarity_score', 0.0),
-                            'recommendation_reason': f"AI match score: {job_match.get('similarity_score', 0.0):.2f}"
-                        }
-                    )
-                    
-                    if created:
-                        recommendations_created += 1
-                        
-            except Job.DoesNotExist:
-                continue
-        
-        logger.info(f"Generated {recommendations_created} new job recommendations for user {user_id}")
-        
-        # Trigger email notification if user has recommendations
-        if recommendations_created > 0:
-            from apps.notifications.tasks import send_job_recommendations_task
-            send_job_recommendations_task.delay(user_id)
-        
-        return {
-            'status': 'success',
-            'recommendations_created': recommendations_created,
-            'user_id': str(user_id)
-        }
-        
-    except User.DoesNotExist:
-        logger.error(f"User {user_id} not found for job matching")
-        return {'status': 'user_not_found'}
-    except Exception as exc:
-        logger.error(f"Error in intelligent job matching for user {user_id}: {exc}")
-        raise self.retry(exc=exc, countdown=300)
-
-
-@shared_task(bind=True, max_retries=3)
-def batch_intelligent_job_matching(self, limit=50):
-    """
-    Run intelligent job matching for multiple users.
-    """
-    try:
-        from apps.accounts.models import UserProfile
-        
-        # Get users with profiles who haven't had recommendations recently
-        cutoff_time = timezone.now() - timedelta(days=7)  # Weekly recommendations
-        
-        users_for_matching = User.objects.filter(
-            profile__isnull=False,
-            is_active=True
-        ).exclude(
-            recommendedjob__created_at__gte=cutoff_time
-        )[:limit]
-        
-        queued_count = 0
-        for user in users_for_matching:
-            intelligent_job_matching.delay(user.id)
-            queued_count += 1
-        
-        logger.info(f"Queued intelligent job matching for {queued_count} users")
-        return {'status': 'success', 'queued_users': queued_count}
-        
-    except Exception as exc:
-        logger.error(f"Error in batch job matching: {exc}")
-        raise self.retry(exc=exc, countdown=300)
-
-
-@shared_task(bind=True, max_retries=3)
-def submit_application_via_skyvern(self, application_id):
-    """
-    Submit job application using Skyvern automation.
-    """
-    try:
-        from apps.jobs.models import Application
-        from apps.integrations.services.skyvern import SkyvernAPIClient
-        
-        application = Application.objects.select_related('user', 'job').get(id=application_id)
-        
-        # Check if application can be automated
-        if not application.job.application_url:
-            logger.warning(f"Job {application.job.id} has no application URL for Skyvern automation")
-            return {'status': 'no_url', 'application_id': application_id}
-        
-        skyvern_client = SkyvernAPIClient()
-        
-        # Prepare application data
-        application_data = {
-            'url': application.job.application_url,
-            'user_data': {
-                'name': f"{application.user.first_name} {application.user.last_name}",
-                'email': application.user.email,
-                'phone': getattr(application.user.profile, 'phone_number', ''),
-                'resume_url': application.resume_file.url if application.resume_file else None,
-                'cover_letter': application.cover_letter or ''
-            },
-            'job_data': {
-                'title': application.job.title,
-                'company': application.job.company,
-                'location': application.job.location
-            }
-        }
-        
-        # Create Skyvern task
-        task_result = skyvern_client.create_task(
-            url=application.job.application_url,
-            task_data=application_data
-        )
-        
-        if task_result and 'task_id' in task_result:
-            # Update application with Skyvern task ID
-            application.skyvern_task_id = task_result['task_id']
-            application.status = 'submitted'
-            application.save()
-            
-            # Queue status monitoring
-            monitor_skyvern_task.delay(application.id, task_result['task_id'])
-            
-            logger.info(f"Skyvern task {task_result['task_id']} created for application {application_id}")
-            
-            # Send status update email
-            from apps.notifications.tasks import send_application_status_update_task
-            send_application_status_update_task.delay(application_id, 'pending')
-            
-            return {
-                'status': 'submitted',
-                'task_id': task_result['task_id'],
-                'application_id': application_id
-            }
-        else:
-            logger.error(f"Failed to create Skyvern task for application {application_id}")
-            return {'status': 'failed_to_create_task'}
-        
-    except Application.DoesNotExist:
-        logger.error(f"Application {application_id} not found")
-        return {'status': 'application_not_found'}
-    except Exception as exc:
-        logger.error(f"Error submitting application {application_id} via Skyvern: {exc}")
-        raise self.retry(exc=exc, countdown=600)  # 10 minute retry
-
-
-@shared_task(bind=True, max_retries=5)
-def monitor_skyvern_task(self, application_id, task_id):
-    """
-    Monitor Skyvern task status and update application accordingly.
-    """
-    try:
-        from apps.jobs.models import Application
-        from apps.integrations.services.skyvern import SkyvernAPIClient
-        
-        application = Application.objects.get(id=application_id)
-        skyvern_client = SkyvernAPIClient()
-        
-        # Check task status
-        task_status = skyvern_client.get_task_status(task_id)
-        
-        if not task_status:
-            logger.warning(f"Could not get status for Skyvern task {task_id}")
-            raise self.retry(countdown=300)  # Retry in 5 minutes
-        
-        status = task_status.get('status', '').lower()
-        
-        if status == 'completed':
-            # Get task results
-            task_result = skyvern_client.get_task_result(task_id)
-            
-            if task_result and task_result.get('success'):
-                application.status = 'submitted'
-                application.skyvern_result = task_result
-                application.save()
-                
-                logger.info(f"Skyvern application submission completed for application {application_id}")
-                
-                # Send success notification
-                from apps.notifications.tasks import send_application_status_update_task
-                send_application_status_update_task.delay(application_id, 'pending')
-                
-                return {'status': 'completed', 'success': True}
-            else:
-                application.status = 'failed'
-                application.skyvern_result = task_result
-                application.save()
-                
-                logger.error(f"Skyvern task {task_id} completed but failed for application {application_id}")
-                return {'status': 'completed', 'success': False}
-                
-        elif status == 'failed':
-            application.status = 'failed'
-            application.skyvern_result = task_status
-            application.save()
-            
-            logger.error(f"Skyvern task {task_id} failed for application {application_id}")
-            return {'status': 'failed'}
-            
-        elif status in ['running', 'queued', 'pending']:
-            # Task still in progress, retry monitoring
-            logger.info(f"Skyvern task {task_id} still {status}, will retry monitoring")
-            raise self.retry(countdown=300)  # Check again in 5 minutes
-            
-        else:
-            logger.warning(f"Unknown Skyvern task status: {status} for task {task_id}")
-            raise self.retry(countdown=300)
-        
-    except Application.DoesNotExist:
-        logger.error(f"Application {application_id} not found while monitoring Skyvern task")
-        return {'status': 'application_not_found'}
-    except Exception as exc:
-        logger.error(f"Error monitoring Skyvern task {task_id}: {exc}")
-        raise self.retry(exc=exc, countdown=600)
-
-
-@shared_task(bind=True, max_retries=3)
-def process_pending_applications(self):
-    """
-    Process applications that are pending Skyvern automation.
-    """
-    try:
-        from apps.jobs.models import Application
-        
-        # Get pending applications that haven't been processed
-        pending_applications = Application.objects.filter(
-            status='pending',
-            skyvern_task_id__isnull=True,
-            job__application_url__isnull=False
-        ).select_related('user', 'job')[:10]  # Limit to avoid overwhelming Skyvern
-        
-        processed_count = 0
-        for application in pending_applications:
-            submit_application_via_skyvern.delay(application.id)
-            processed_count += 1
-        
-        logger.info(f"Queued {processed_count} applications for Skyvern processing")
-        return {'status': 'success', 'queued_applications': processed_count}
-        
-    except Exception as exc:
-        logger.error(f"Error processing pending applications: {exc}")
-        raise self.retry(exc=exc, countdown=300)
-
-
-@shared_task(bind=True)
-def weekly_system_maintenance(self):
-    """
-    Weekly maintenance tasks for the system.
-    """
-    try:
-        logger.info("Starting weekly system maintenance")
-        
-        # 1. Batch generate missing embeddings
-        batch_generate_job_embeddings.delay(limit=100)
-        batch_generate_user_embeddings.delay(limit=100)
-        
-        # 2. Run intelligent job matching for all users
-        batch_intelligent_job_matching.delay(limit=200)
-        
-        # 3. Clean up old data
-        cleanup_old_jobs.delay(days_old=45)
-        
-        # 4. Update statistics
-        update_job_statistics.delay()
-        
-        logger.info("Weekly maintenance tasks queued successfully")
-        return {'status': 'success', 'timestamp': timezone.now().isoformat()}
-        
-    except Exception as exc:
-        logger.error(f"Error in weekly maintenance: {exc}")
-        return {'status': 'error', 'error': str(exc)}
-
-
-@shared_task(bind=True, max_retries=3)
-def process_knowledge_article_for_rag_task(self, article_id):
-    """
-    Process a knowledge article for RAG storage.
-    This task handles embedding generation and RAG vector storage for articles.
-    """
-    try:
-        from apps.common.models import KnowledgeArticle
-        from apps.integrations.services.openai import EmbeddingService
-        from apps.common.services import VectorDBService
-        
-        try:
-            article = KnowledgeArticle.objects.get(id=article_id)
-        except KnowledgeArticle.DoesNotExist:
-            logger.error(f"KnowledgeArticle {article_id} not found")
-            return {'status': 'article_not_found', 'article_id': article_id}
-        
-        vector_db_service = VectorDBService()
-        
-        if article.is_active:
-            # Process active article - generate embeddings and add to RAG
-            embedding_service = EmbeddingService()
-            
-            # Prepare content for embedding
-            content_text = f"Title: {article.title}\n\nContent: {article.content}"
-            if article.tags:
-                content_text += f"\n\nTags: {', '.join(article.tags)}"
-            
-            try:
-                # Generate embedding
-                embeddings = embedding_service.generate_embeddings([content_text])
-                if embeddings and embeddings[0]:
-                    # Prepare metadata
-                    metadata = {
-                        'article_id': str(article.id),
-                        'title': article.title,
-                        'category': article.category,
-                        'tags': article.tags or [],
-                        'created_at': article.created_at.isoformat() if article.created_at else None,
-                        'updated_at': article.updated_at.isoformat() if article.updated_at else None
-                    }
-                    
-                    # Remove existing document if it exists
-                    vector_db_service.delete_documents(
-                        source_type='knowledge_article', 
-                        source_ids=[str(article.id)]
-                    )
-                    
-                    # Add to vector database
-                    success = vector_db_service.add_document(
-                        text_content=content_text,
-                        embedding=embeddings[0],
-                        source_type='knowledge_article',
-                        source_id=str(article.id),
-                        metadata=metadata
-                    )
-                    
-                    if success:
-                        logger.info(f"Successfully processed active knowledge article {article_id} for RAG")
-                        return {'status': 'success', 'action': 'added_to_rag', 'article_id': article_id}
-                    else:
-                        logger.error(f"Failed to add knowledge article {article_id} to RAG")
-                        return {'status': 'error', 'action': 'failed_to_add', 'article_id': article_id}
-                else:
-                    logger.warning(f"No embeddings generated for knowledge article {article_id}")
-                    return {'status': 'no_embeddings', 'article_id': article_id}
-                    
-            except Exception as e:
-                logger.error(f"Error generating embeddings for knowledge article {article_id}: {e}")
-                raise
-        else:
-            # Process inactive article - remove from RAG
-            deleted_count = vector_db_service.delete_documents(
-                source_type='knowledge_article',
-                source_ids=[str(article.id)]
-            )
-            
-            logger.info(f"Removed inactive knowledge article {article_id} from RAG (deleted {deleted_count} documents)")
-            return {'status': 'success', 'action': 'removed_from_rag', 'article_id': article_id, 'deleted_count': deleted_count}
+    Submits a job application using the Skyvern service.
     
+    Args:
+        user_id: The ID of the user applying.
+        job_id: The ID of the job being applied for.
+        application_id: The ID of the JobApplication model instance.
+    """
+    try:
+        from apps.jobs.models import Job, JobApplication
+        from apps.integrations.services.skyvern import SkyvernService
+        from django.contrib.auth import get_user_model
+        User = get_user_model()
+
+
+        user = User.objects.get(id=user_id)
+        job = Job.objects.get(id=job_id)
+        application = JobApplication.objects.get(id=application_id)
+        
+        if not job.application_url:
+            application.status = 'failed'
+            application.notes = 'Application failed: No application URL for the job.'
+            application.save()
+            logger.error(f"Skyvern submission failed for application {application_id}: No job URL.")
+            return {'status': 'error', 'reason': 'no_job_url'}
+
+        skyvern_service = SkyvernService()
+        
+        # This is a simplified mapping. A real implementation would be more robust.
+        user_data = {
+            "first_name": user.first_name,
+            "last_name": user.last_name,
+            "email": user.email,
+            "phone": user.profile.phone_number if hasattr(user, 'profile') else "",
+            "resume_url": user.profile.resume.url if hasattr(user, 'profile') and user.profile.resume else "",
+            # Add other fields as required by Skyvern
+        }
+
+        # Filter out empty values
+        user_data = {k: v for k, v in user_data.items() if v}
+
+        submission_result = skyvern_service.submit_application(
+            application_url=job.application_url,
+            user_data=user_data
+        )
+
+        SKYVERN_APPLICATION_SUBMISSIONS_TOTAL.inc()
+
+        if submission_result and submission_result.get('success'):
+            application.status = 'submitted'
+            application.external_application_id = submission_result.get('application_id')
+            application.notes = f"Successfully submitted to Skyvern. Monitoring ID: {application.external_application_id}"
+            application.save()
+            
+            # Kick off the monitoring task
+            monitor_skyvern_application_status.delay(application_id=str(application.id))
+            
+            logger.info(f"Successfully submitted application {application_id} to Skyvern.")
+            return {'status': 'success', 'application_id': str(application_id), 'skyvern_id': application.external_application_id}
+        else:
+            error_message = submission_result.get('error', 'Unknown error from Skyvern.')
+            application.status = 'failed'
+            application.notes = f"Skyvern submission failed: {error_message}"
+            application.save()
+            logger.error(f"Skyvern submission failed for application {application_id}: {error_message}")
+            return {'status': 'error', 'reason': error_message}
+
+    except (User.DoesNotExist, Job.DoesNotExist, JobApplication.DoesNotExist) as e:
+        logger.error(f"Could not find User, Job, or Application for Skyvern task: {e}")
+        return {'status': 'error', 'reason': 'model_not_found'}
     except Exception as exc:
-        logger.error(f"Error processing knowledge article {article_id} for RAG: {exc}")
+        logger.error(f"Critical error in submit_job_application_with_skyvern: {exc}")
         raise self.retry(exc=exc, countdown=60 * (2 ** self.request.retries))
+
+
+@shared_task(bind=True, max_retries=10, default_retry_delay=5 * 60) # Retry over a longer period
+def monitor_skyvern_application_status(self, application_id: str):
+    """
+    Periodically checks the status of a submitted Skyvern application.
+    
+    Args:
+        application_id: The ID of our JobApplication model instance.
+    """
+    try:
+        from apps.jobs.models import JobApplication
+        from apps.integrations.services.skyvern import SkyvernService
+
+        application = JobApplication.objects.get(id=application_id)
+        
+        if not application.external_application_id:
+            logger.warning(f"Cannot monitor Skyvern status for application {application_id}: no external ID.")
+            return {'status': 'error', 'reason': 'no_external_id'}
+
+        skyvern_service = SkyvernService()
+        status_result = skyvern_service.get_application_status(application.external_application_id)
+
+        if status_result and status_result.get('success'):
+            skyvern_status = status_result.get('status')
+            
+            # Update our internal status based on Skyvern's response
+            # This mapping might need to be adjusted based on actual Skyvern statuses
+            if skyvern_status == 'completed':
+                application.status = 'applied'
+                application.notes = "Skyvern confirmed application completion."
+                logger.info(f"Skyvern application {application.external_application_id} completed successfully.")
+                # Stop retrying
+            elif skyvern_status == 'failed':
+                application.status = 'failed'
+                application.notes = f"Skyvern reported application failure: {status_result.get('error', 'No details provided.')}
+                logger.error(f"Skyvern application {application.external_application_id} failed.")
+                # Stop retrying
+            else: # e.g., 'in_progress', 'queued'
+                # Re-queue the task to check again later
+                logger.info(f"Skyvern application {application.external_application_id} is still in progress ({skyvern_status}). Re-checking later.")
+                raise self.retry(countdown=15 * 60) # Check again in 15 minutes
+            
+            application.save()
+            return {'status': 'updated', 'new_status': application.status}
+        else:
+            # The API call to Skyvern failed
+            logger.error(f"Failed to get status from Skyvern for application {application.external_application_id}. Retrying...")
+            raise self.retry()
+
+    except JobApplication.DoesNotExist:
+        logger.error(f"Cannot monitor Skyvern status, JobApplication not found: {application_id}")
+        # Do not retry if the application doesn't exist
+    except Exception as exc:
+        logger.error(f"Critical error in monitor_skyvern_application_status: {exc}")
+        raise self.retry(exc=exc)
