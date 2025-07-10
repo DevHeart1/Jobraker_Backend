@@ -1372,3 +1372,88 @@ def weekly_system_maintenance(self):
     except Exception as exc:
         logger.error(f"Error in weekly maintenance: {exc}")
         return {'status': 'error', 'error': str(exc)}
+
+
+@shared_task(bind=True, max_retries=3)
+def process_knowledge_article_for_rag_task(self, article_id):
+    """
+    Process a knowledge article for RAG storage.
+    This task handles embedding generation and RAG vector storage for articles.
+    """
+    try:
+        from apps.common.models import KnowledgeArticle
+        from apps.integrations.services.openai import EmbeddingService
+        from apps.common.services import VectorDBService
+        
+        try:
+            article = KnowledgeArticle.objects.get(id=article_id)
+        except KnowledgeArticle.DoesNotExist:
+            logger.error(f"KnowledgeArticle {article_id} not found")
+            return {'status': 'article_not_found', 'article_id': article_id}
+        
+        vector_db_service = VectorDBService()
+        
+        if article.is_active:
+            # Process active article - generate embeddings and add to RAG
+            embedding_service = EmbeddingService()
+            
+            # Prepare content for embedding
+            content_text = f"Title: {article.title}\n\nContent: {article.content}"
+            if article.tags:
+                content_text += f"\n\nTags: {', '.join(article.tags)}"
+            
+            try:
+                # Generate embedding
+                embeddings = embedding_service.generate_embeddings([content_text])
+                if embeddings and embeddings[0]:
+                    # Prepare metadata
+                    metadata = {
+                        'article_id': str(article.id),
+                        'title': article.title,
+                        'category': article.category,
+                        'tags': article.tags or [],
+                        'created_at': article.created_at.isoformat() if article.created_at else None,
+                        'updated_at': article.updated_at.isoformat() if article.updated_at else None
+                    }
+                    
+                    # Remove existing document if it exists
+                    vector_db_service.delete_documents(
+                        source_type='knowledge_article', 
+                        source_ids=[str(article.id)]
+                    )
+                    
+                    # Add to vector database
+                    success = vector_db_service.add_document(
+                        text_content=content_text,
+                        embedding=embeddings[0],
+                        source_type='knowledge_article',
+                        source_id=str(article.id),
+                        metadata=metadata
+                    )
+                    
+                    if success:
+                        logger.info(f"Successfully processed active knowledge article {article_id} for RAG")
+                        return {'status': 'success', 'action': 'added_to_rag', 'article_id': article_id}
+                    else:
+                        logger.error(f"Failed to add knowledge article {article_id} to RAG")
+                        return {'status': 'error', 'action': 'failed_to_add', 'article_id': article_id}
+                else:
+                    logger.warning(f"No embeddings generated for knowledge article {article_id}")
+                    return {'status': 'no_embeddings', 'article_id': article_id}
+                    
+            except Exception as e:
+                logger.error(f"Error generating embeddings for knowledge article {article_id}: {e}")
+                raise
+        else:
+            # Process inactive article - remove from RAG
+            deleted_count = vector_db_service.delete_documents(
+                source_type='knowledge_article',
+                source_ids=[str(article.id)]
+            )
+            
+            logger.info(f"Removed inactive knowledge article {article_id} from RAG (deleted {deleted_count} documents)")
+            return {'status': 'success', 'action': 'removed_from_rag', 'article_id': article_id, 'deleted_count': deleted_count}
+    
+    except Exception as exc:
+        logger.error(f"Error processing knowledge article {article_id} for RAG: {exc}")
+        raise self.retry(exc=exc, countdown=60 * (2 ** self.request.retries))
