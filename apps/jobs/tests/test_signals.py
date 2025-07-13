@@ -13,7 +13,7 @@ class JobSignalTests(TestCase):
 
     def setUp(self):
         # Create a user for model instances that require a user
-        self.user = User.objects.create_user(username='testsignaluser', password='password')
+        self.user = User.objects.create_user(email='testsignaluser@example.com', password='password')
         # Basic job data
         self.job_data = {
             'title': "Signal Test Job",

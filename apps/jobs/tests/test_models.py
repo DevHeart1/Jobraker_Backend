@@ -8,7 +8,6 @@ class JobAlertModelTest(TestCase):
 
     def setUp(self):
         self.user = User.objects.create_user(
-            username='testuseralert',
             email='testuseralert@example.com',
             password='password123'
         )
@@ -17,7 +16,7 @@ class JobAlertModelTest(TestCase):
             name="Test Python Alert",
             keywords=["Python", "Developer"],
             location="Remote",
-            frequency=JobAlert.FREQUENCY_CHOICES.DAILY, # Accessing choices as defined in existing model
+            frequency='daily',
             is_active=True
         )
 
@@ -30,17 +29,16 @@ class JobAlertModelTest(TestCase):
         self.assertEqual(self.alert.frequency, 'daily')
 
     def test_job_alert_str_representation(self):
-        self.assertEqual(str(self.alert), "Test Python Alert for testuseralert@example.com")
+        self.assertEqual(str(self.alert), ": Test Python Alert")
 
         unnamed_alert = JobAlert.objects.create(user=self.user)
-        # Assuming email is preferred, if not username. User model might not have get_full_name without customization.
-        # The model's __str__ uses: f"{self.name or 'Unnamed Alert'} for {self.user.email or self.user.username}"
-        self.assertEqual(str(unnamed_alert), f"Unnamed Alert for {self.user.email}")
+        # The model's __str__ uses: f"{self.user.get_full_name()}: {self.name}"
+        self.assertEqual(str(unnamed_alert), ": ")
 
     def test_job_alert_default_values(self):
         alert_with_defaults = JobAlert.objects.create(user=self.user, name="Defaults Test")
         self.assertTrue(alert_with_defaults.is_active)
-        self.assertEqual(alert_with_defaults.frequency, JobAlert.FREQUENCY_CHOICES.DAILY) # Default is 'daily'
+        self.assertEqual(alert_with_defaults.frequency, 'daily') # Default is 'daily'
         self.assertEqual(alert_with_defaults.keywords, []) # Default for JSONField is list
 
     # The can_send_notification method was my proposal, it's not on the existing model.
@@ -67,7 +65,7 @@ from django.utils import timezone
 
 class ApplicationModelAdvancedTrackingTest(TestCase):
     def setUp(self):
-        self.user = User.objects.create_user(username='testappuser', email='testappuser@example.com', password='password')
+        self.user = User.objects.create_user(email='testappuser@example.com', password='password')
         self.job = Job.objects.create(title="Test Job for App", company="Test Co", description="Desc", location="Loc")
         self.application = Application.objects.create(user=self.user, job=self.job)
 

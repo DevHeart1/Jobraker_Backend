@@ -13,7 +13,7 @@ router.register(r'sessions', views.ChatSessionViewSet, basename='chatsession')
 urlpatterns = [
     # Chat endpoints
     path('send/', views.SendMessageView.as_view(), name='send_message'),
-    path('chat/', views.SendMessageView.as_view(), name='chat'),  # Alias for tests
+    path('chat/', views.ChatView.as_view(), name='chat'),  # For async task-based messaging
     path('advice/', views.JobAdviceView.as_view(), name='job_advice'),
     path('websocket-token/', views.get_websocket_token, name='websocket_token'),
     

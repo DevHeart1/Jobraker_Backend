@@ -261,9 +261,9 @@ class TestJobAlertTasks(unittest.TestCase):
         self.MockJobAlertModel.objects.filter.return_value = MockQuerySet([alert1])
 
         # Job matches "Backend" in title, "Urgent" in description
-        job1 = MockJob(id=uuid.uuid4(), title="Senior Backend Engineer", description="This is an Urgent requirement.", location="Anywhere", job_type="full_time", experience_level="senior", is_remote=True, salary_min=100k, salary_max=150k, created_at=self.mock_now - timedelta(minutes=30))
+        job1 = MockJob(id=uuid.uuid4(), title="Senior Backend Engineer", description="This is an Urgent requirement.", location="Anywhere", job_type="full_time", experience_level="senior", is_remote=True, salary_min=100000, salary_max=150000, created_at=self.mock_now - timedelta(minutes=30))
         # Job matches only "Backend"
-        job2 = MockJob(id=uuid.uuid4(), title="Backend Developer", description="Standard role.", location="Anywhere", job_type="full_time", experience_level="senior", is_remote=True, salary_min=100k, salary_max=150k, created_at=self.mock_now - timedelta(minutes=30))
+        job2 = MockJob(id=uuid.uuid4(), title="Backend Developer", description="Standard role.", location="Anywhere", job_type="full_time", experience_level="senior", is_remote=True, salary_min=100000, salary_max=150000, created_at=self.mock_now - timedelta(minutes=30))
 
         # Simulate that the filter for job1 (matching both keywords in OR, and other criteria) returns job1
         # This requires more sophisticated mocking of the Q object filtering if we want to test the Q logic precisely.
@@ -358,9 +358,9 @@ class TestApplicationReminderTasks(unittest.TestCase):
 
 
         # Create actual DB objects for testing queries
-        self.user1 = ActualUser.objects.create_user(username='reminderuser1', email='reminder1@example.com', password='password', first_name='Reminder1')
-        self.user2 = ActualUser.objects.create_user(username='reminderuser2', email='reminder2@example.com', password='password', first_name='Reminder2')
-        self.user_no_email = ActualUser.objects.create_user(username='noemailuser', password='password')
+        self.user1 = ActualUser.objects.create_user(email='reminder1@example.com', password='password', first_name='Reminder1')
+        self.user2 = ActualUser.objects.create_user(email='reminder2@example.com', password='password', first_name='Reminder2')
+        self.user_no_email = ActualUser.objects.create_user(email='noemail@example.com', password='password')
 
 
         self.job1 = ActualJob.objects.create(title="Job A", company="Comp A", description=".", location=".")

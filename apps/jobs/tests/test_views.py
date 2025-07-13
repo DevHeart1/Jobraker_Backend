@@ -140,8 +140,8 @@ class JobRecommendationsViewTests(APITestCase):
 
 class JobAlertViewSetTest(APITestCase):
     def setUp(self):
-        self.user1 = User.objects.create_user(username='user1alert', email='user1alert@example.com', password='password1')
-        self.user2 = User.objects.create_user(username='user2alert', email='user2alert@example.com', password='password2')
+        self.user1 = User.objects.create_user(email='user1alert@example.com', password='password1')
+        self.user2 = User.objects.create_user(email='user2alert@example.com', password='password2')
 
         self.alert1_user1 = JobAlert.objects.create(
             user=self.user1,
@@ -305,7 +305,7 @@ from apps.jobs.serializers import ApplicationSerializer # Import ApplicationSeri
 
 class ApplicationViewSetAdvancedTrackingTest(APITestCase):
     def setUp(self):
-        self.user = User.objects.create_user(username='apptrackuser', email='apptrackuser@example.com', password='password')
+        self.user = User.objects.create_user(email='apptrackuser@example.com', password='password')
         self.job = Job.objects.create(title="Test Job for App Tracking", company="Track Co", description="Desc", location="Loc")
         self.application = Application.objects.create(
             user=self.user,
@@ -356,7 +356,7 @@ class ApplicationViewSetAdvancedTrackingTest(APITestCase):
 
 
     def test_update_application_by_non_owner_fails(self):
-        other_user = User.objects.create_user(username='otheruserapp', email='other@example.com', password='password')
+        other_user = User.objects.create_user(email='other@example.com', password='password')
         self.client.force_authenticate(user=other_user) # Authenticate as a different user
 
         patch_data = {"user_notes": "Trying to update other user's application."}
@@ -369,7 +369,7 @@ class ApplicationViewSetAdvancedTrackingTest(APITestCase):
 # Tests for JobViewSet's generate_interview_questions action
 class JobViewSetInterviewQuestionActionTest(APITestCase):
     def setUp(self):
-        self.user = User.objects.create_user(username='interviewprepuser', email='interview@example.com', password='password')
+        self.user = User.objects.create_user(email='interview@example.com', password='password')
         self.job = Job.objects.create(
             pk=uuid.uuid4(), # Ensure pk is set for URL reversing
             title="Senior AI Engineer",
@@ -447,7 +447,7 @@ from apps.jobs.documents import JobDocument # For mocking search
 
 class JobSearchViewElasticsearchTest(APITestCase):
     def setUp(self):
-        self.user = User.objects.create_user(username='essearchuser', email='essearch@example.com', password='password')
+        self.user = User.objects.create_user(email='essearch@example.com', password='password')
         self.client = APIClient()
         self.client.force_authenticate(user=self.user)
         self.search_url = reverse('job_search') # Assuming 'job_search' is the name of JobSearchView URL

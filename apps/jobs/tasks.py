@@ -485,17 +485,17 @@ def generate_job_embedding_task(self, job_id: int):
         # Combine relevant fields for a rich embedding
         text_to_embed = (
             f"Job Title: {job.title}. "
-            f"Company: {job.company_name}. "
+            f"Company: {job.company}. "
             f"Description: {job.description}. "
-            f"Skills: {', '.join(job.required_skills) if job.required_skills else 'Not specified'}."
+            f"Skills: {', '.join(job.skills_required) if job.skills_required else 'Not specified'}."
         )
 
         embedding_service = EmbeddingService()
         embedding = embedding_service.generate_embedding(text_to_embed)
 
         if embedding:
-            job.embedding = embedding
-            job.save(update_fields=['embedding'])
+            job.job_embedding = embedding
+            job.save(update_fields=['job_embedding'])
             logger.info(f"Successfully generated and saved embedding for Job ID: {job_id}")
             return {'status': 'success', 'job_id': job_id}
         else:

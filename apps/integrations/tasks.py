@@ -660,9 +660,8 @@ def get_openai_chat_response_task(self, user_id: int, session_id: int, message: 
             chat_session = ChatSession.objects.get(id=session_id)
             ai_message = ChatMessage.objects.create(
                 session=chat_session,
-                message="I'm sorry, my connection to my core services is currently unavailable. Please try again later.",
-                sender='ai',
-                is_read=False
+                content="I'm sorry, my connection to my core services is currently unavailable. Please try again later.",
+                role='assistant'
             )
             return {'status': 'error', 'reason': 'no_api_key', 'message_id': ai_message.id}
 
@@ -719,7 +718,7 @@ Keep your responses concise and helpful."""
         api_messages = [{"role": "system", "content": system_message_content}]
         if conversation_history:
             for msg in conversation_history:
-                api_messages.append({"role": msg['sender'], "content": msg['message']})
+                api_messages.append({"role": msg['role'], "content": msg['content']})
         
         # Add the current user message and RAG context
         user_prompt_main_query = message
@@ -754,9 +753,8 @@ Keep your responses concise and helpful."""
         chat_session = ChatSession.objects.get(id=session_id)
         ai_message = ChatMessage.objects.create(
             session=chat_session,
-            message=ai_response_text,
-            sender='ai',
-            is_read=False # Will be marked as read when delivered via WebSocket
+            content=ai_response_text,
+            role='assistant'
         )
 
         # The consumer will be listening for this and push it to the client
@@ -764,8 +762,8 @@ Keep your responses concise and helpful."""
             'status': status,
             'message_id': ai_message.id,
             'session_id': session_id,
-            'message': ai_response_text,
-            'sender': 'ai'
+            'content': ai_response_text,
+            'role': 'assistant'
         }
 
     except ChatSession.DoesNotExist:

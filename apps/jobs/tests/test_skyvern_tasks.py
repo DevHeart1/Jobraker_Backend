@@ -14,7 +14,6 @@ User = get_user_model()
 def user_with_profile():
     """Fixture for a user with a complete profile and resume."""
     user = User.objects.create_user(
-        username='testuser',
         email='test@example.com',
         password='password123',
         first_name='Test',

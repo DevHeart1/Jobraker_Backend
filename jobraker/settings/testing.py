@@ -63,3 +63,9 @@ LOGGING = {
 SECRET_KEY = 'test-secret-key-not-for-production'
 DEBUG = True
 ALLOWED_HOSTS = ['*']
+
+# Disable Elasticsearch during testing
+ELASTICSEARCH_DSL = {}
+
+# Remove elasticsearch app from installed apps for testing
+INSTALLED_APPS = [app for app in INSTALLED_APPS if app != 'django_elasticsearch_dsl']
