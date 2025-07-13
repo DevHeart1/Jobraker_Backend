@@ -1,5 +1,6 @@
 #!/bin/bash
 # Production Deployment Script for Jobraker Backend
+# Enhanced with PostgreSQL, Redis, and WebSocket support
 
 set -e
 

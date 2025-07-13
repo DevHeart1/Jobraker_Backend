@@ -262,11 +262,12 @@ class NotificationConsumer(AsyncWebsocketConsumer):
         """
         Called when the WebSocket closes for any reason.
         """
-        # Leave room group
-        await self.channel_layer.group_discard(
-            self.room_group_name,
-            self.channel_name
-        )
+        # Leave room group only if we successfully joined it
+        if hasattr(self, 'room_group_name'):
+            await self.channel_layer.group_discard(
+                self.room_group_name,
+                self.channel_name
+            )
     
     async def receive(self, text_data):
         """

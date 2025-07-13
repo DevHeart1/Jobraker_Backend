@@ -128,3 +128,25 @@ CACHES = {
         }
     }
 }
+
+# WebSocket Configuration for Development
+# Use in-memory channel layer when Redis is not available
+import os
+redis_available = os.getenv('REDIS_AVAILABLE', 'False').lower() == 'true'
+
+if not redis_available:
+    CHANNEL_LAYERS = {
+        'default': {
+            'BACKEND': 'channels.layers.InMemoryChannelLayer',
+        },
+    }
+else:
+    # Use Redis channel layer for production-like testing
+    CHANNEL_LAYERS = {
+        'default': {
+            'BACKEND': 'channels_redis.core.RedisChannelLayer',
+            'CONFIG': {
+                "hosts": [os.getenv('REDIS_URL', 'redis://localhost:6379/0')],
+            },
+        },
+    }

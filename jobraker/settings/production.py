@@ -19,7 +19,8 @@ def validate_env_var(var_name, required=True, default=None):
 # Required environment variables validation
 try:
     SECRET_KEY = validate_env_var('DJANGO_SECRET_KEY', required=True)
-    DATABASE_URL = validate_env_var('DATABASE_URL', required=True)
+    # Make DATABASE_URL optional, fallback to individual DB settings
+    DATABASE_URL = validate_env_var('DATABASE_URL', required=False)
     REDIS_URL = validate_env_var('REDIS_URL', required=True)
 except ValueError as e:
     print(f"ERROR: {e}")

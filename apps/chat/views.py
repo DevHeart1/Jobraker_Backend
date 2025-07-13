@@ -1,7 +1,7 @@
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
 from rest_framework import viewsets, permissions, status, serializers
-from rest_framework.decorators import action
+from rest_framework.decorators import action, api_view, permission_classes
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework.pagination import PageNumberPagination
@@ -15,6 +15,7 @@ from .serializers import (
     SendMessageSerializer,
     ChatResponseSerializer
 )
+from rest_framework_simplejwt.tokens import RefreshToken
 
 # Optional: for job-specific advice views later
 # from apps.accounts.serializers import UserSerializer
@@ -308,3 +309,19 @@ class JobAdviceView(APIView):
             {"detail": "This feature (Job Advice) is not yet implemented."},
             status=501
         )
+
+
+@api_view(['POST'])
+@permission_classes([permissions.IsAuthenticated])
+def get_websocket_token(request):
+    """
+    Generate a WebSocket authentication token for the current user.
+    """
+    refresh = RefreshToken.for_user(request.user)
+    access_token = refresh.access_token
+    
+    return Response({
+        'websocket_token': str(access_token),
+        'user_id': str(request.user.id),
+        'expires_in': access_token.payload.get('exp') - access_token.payload.get('iat')
+    })
