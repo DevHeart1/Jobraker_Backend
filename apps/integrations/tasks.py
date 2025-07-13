@@ -819,7 +819,7 @@ def submit_skyvern_application_task(self, application_id: str):
             return {'status': 'success', 'application_id': application_id, 'run_id': application.skyvern_run_id}
         else:
             application.status = 'failed'
-            application.notes = f"Skyvern submission failed: {submission_response.get('error', 'Unknown error')}
+            application.notes = f"Skyvern submission failed: {submission_response.get('error', 'Unknown error')}"
             application.save(update_fields=['status', 'notes'])
             
             SKYVERN_APPLICATION_SUBMISSIONS_TOTAL.labels(status='failed').inc()
