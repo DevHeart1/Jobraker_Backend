@@ -120,6 +120,10 @@ CORS_ALLOWED_ORIGINS = [
     validate_env_var('CORS_ALLOWED_ORIGINS', default='').split(',') 
     if origin.strip()
 ]
+
+CSRF_TRUSTED_ORIGINS = [
+    "https://jobraker-backend.onrender.com",
+]
 CORS_ALLOW_CREDENTIALS = True
 CORS_ALLOW_ALL_ORIGINS = False  # Security: Never allow all origins in production
 

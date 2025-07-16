@@ -43,6 +43,10 @@ MIDDLEWARE = [
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
 ]
 
+CSRF_TRUSTED_ORIGINS = [
+    "https://jobraker-backend.onrender.com",
+]
+
 # CORS settings for development
 CORS_ALLOWED_ORIGINS = [
     'http://localhost:3000',
