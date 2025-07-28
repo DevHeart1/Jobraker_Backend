@@ -63,11 +63,13 @@ CORS_ALLOW_ALL_ORIGINS = True  # Only for development
 
 # CSRF settings for development
 CSRF_TRUSTED_ORIGINS = [
-    'http://localhost:8000',
-    'http://127.0.0.1:8000',
-    'https://localhost:8000',
-    'https://127.0.0.1:8000',
-    'http://0.0.0.0:8000',
+    "https://jobraker-backend.onrender.com",
+    "https://jobraker.com",
+    "http://localhost:8000",
+    "http://127.0.0.1:8000",
+    "https://localhost:8000",
+    "https://127.0.0.1:8000",
+    "http://0.0.0.0:8000",
 ]
 
 # Disable HTTPS redirect in development

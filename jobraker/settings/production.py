@@ -121,8 +121,15 @@ CORS_ALLOWED_ORIGINS = [
     if origin.strip()
 ]
 
+# Unified CSRF trusted origins for both dev and prod
 CSRF_TRUSTED_ORIGINS = [
     "https://jobraker-backend.onrender.com",
+    "https://jobraker.com",
+    "http://localhost:8000",
+    "http://127.0.0.1:8000",
+    "https://localhost:8000",
+    "https://127.0.0.1:8000",
+    "http://0.0.0.0:8000",
 ]
 CORS_ALLOW_CREDENTIALS = True
 CORS_ALLOW_ALL_ORIGINS = False  # Security: Never allow all origins in production
