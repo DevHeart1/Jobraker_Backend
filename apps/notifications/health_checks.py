@@ -5,6 +5,7 @@ Health check views for the communication system.
 import json
 import logging
 from datetime import datetime, timedelta
+from django.urls import reverse
 from django.http import JsonResponse
 from django.views.decorators.http import require_http_methods
 from django.views.decorators.csrf import csrf_exempt
@@ -32,7 +33,7 @@ def health_check(request):
         "status": "healthy",
         "timestamp": datetime.now().isoformat(),
         "system": "jobraker-communication",
-        "message": f"Service is up and running. More detailed checks are available at {reverse('production_health_check')}."
+        "message": f"Service is up and running. More detailed checks are available at {reverse('production-health')}."
     }
     return JsonResponse(health_status, status=200)
 
