@@ -23,60 +23,18 @@ User = get_user_model()
 @require_http_methods(["GET"])
 def health_check(request):
     """
-    Comprehensive health check for the communication system.
+    Simple health check to confirm the service is running.
+    This endpoint is used for deployment health checks.
+    It is designed to be lightweight and not depend on external services
+    to prevent timeouts during deployment.
     """
     health_status = {
         "status": "healthy",
         "timestamp": datetime.now().isoformat(),
         "system": "jobraker-communication",
-        "version": "1.0.0",
-        "checks": {}
+        "message": "Service is up and running. More detailed checks are available at /api/v1/notifications/health/production/."
     }
-    
-    overall_healthy = True
-    
-    # Check email service
-    email_status = check_email_service()
-    health_status["checks"]["email"] = email_status
-    if not email_status["healthy"]:
-        overall_healthy = False
-    
-    # Check Celery
-    celery_status = check_celery()
-    health_status["checks"]["celery"] = celery_status
-    if not celery_status["healthy"]:
-        overall_healthy = False
-    
-    # Check Redis/Cache
-    redis_status = check_redis()
-    health_status["checks"]["redis"] = redis_status
-    if not redis_status["healthy"]:
-        overall_healthy = False
-    
-    # Check WebSocket/Channels
-    websocket_status = check_websocket()
-    health_status["checks"]["websocket"] = websocket_status
-    if not websocket_status["healthy"]:
-        overall_healthy = False
-    
-    # Check database connectivity
-    db_status = check_database()
-    health_status["checks"]["database"] = db_status
-    if not db_status["healthy"]:
-        overall_healthy = False
-    
-    # Check templates
-    templates_status = check_templates()
-    health_status["checks"]["templates"] = templates_status
-    if not templates_status["healthy"]:
-        overall_healthy = False
-    
-    health_status["status"] = "healthy" if overall_healthy else "unhealthy"
-    # Always return 200 for health endpoint for Render health check compatibility
-    return JsonResponse(
-        health_status,
-        status=200
-    )
+    return JsonResponse(health_status, status=200)
 
 
 def check_email_service():
