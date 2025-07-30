@@ -1,11 +1,13 @@
-from django.db.models.signals import post_save, post_delete
+from django.db.models.signals import post_delete, post_save
 from django.dispatch import receiver
 from django_elasticsearch_dsl.registries import registry
+
 # It's better to avoid importing the model directly at the module level in signals
 # if the model itself might import signals, to prevent circular dependencies.
 # Instead, use sender=AppName.ModelName string or get model in the handler.
 # However, for type checking or direct use if safe, importing is fine.
 from .models import Job
+
 
 @receiver(post_save, sender=Job, dispatch_uid="update_job_document_on_save")
 def update_job_document_on_save(sender, instance, created, **kwargs):
@@ -31,9 +33,14 @@ def delete_job_document_on_delete(sender, instance, **kwargs):
     Delete the Elasticsearch document when a Job instance is deleted.
     """
     try:
-        registry.delete(instance, raise_on_error=False) # raise_on_error=False will not fail if doc not found
+        registry.delete(
+            instance, raise_on_error=False
+        )  # raise_on_error=False will not fail if doc not found
     except Exception as e:
-        print(f"Error deleting Elasticsearch document for Job {instance.pk} on delete: {e}")
+        print(
+            f"Error deleting Elasticsearch document for Job {instance.pk} on delete: {e}"
+        )
+
 
 @receiver(post_save, sender=Job)
 def trigger_job_embedding_generation(sender, instance, created, **kwargs):
@@ -42,17 +49,17 @@ def trigger_job_embedding_generation(sender, instance, created, **kwargs):
     when a Job instance is created or updated.
     """
     from .tasks import generate_job_embedding_task
-    
+
     # We can add more sophisticated logic here, e.g., only update
     # if key fields like 'description' or 'title' have changed.
     # For now, we trigger on every save.
-    
     # Avoid triggering for fixtures or bulk loads if possible
-    if kwargs.get('raw', False):
+    if kwargs.get("raw", False):
         return
 
     if instance.id:
         generate_job_embedding_task.delay(instance.id)
+
 
 # Note: If using ELASTICSEARCH_DSL_AUTOSYNC = True in settings,
 # django-elasticsearch-dsl attempts to handle these signals automatically.

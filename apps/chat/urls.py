@@ -2,21 +2,23 @@
 URL patterns for chat app.
 """
 
-from django.urls import path, include
+from django.urls import include, path
 from rest_framework.routers import DefaultRouter
+
 from . import views
 
 # Router for ViewSets
 router = DefaultRouter()
-router.register(r'sessions', views.ChatSessionViewSet, basename='chatsession')
+router.register(r"sessions", views.ChatSessionViewSet, basename="chatsession")
 
 urlpatterns = [
     # Chat endpoints
-    path('send/', views.SendMessageView.as_view(), name='send_message'),
-    path('chat/', views.ChatView.as_view(), name='chat'),  # For async task-based messaging
-    path('advice/', views.JobAdviceView.as_view(), name='job_advice'),
-    path('websocket-token/', views.get_websocket_token, name='websocket_token'),
-    
+    path("send/", views.SendMessageView.as_view(), name="send_message"),
+    path(
+        "chat/", views.ChatView.as_view(), name="chat"
+    ),  # For async task-based messaging
+    path("advice/", views.JobAdviceView.as_view(), name="job_advice"),
+    path("websocket-token/", views.get_websocket_token, name="websocket_token"),
     # Include router URLs
-    path('', include(router.urls)),
+    path("", include(router.urls)),
 ]
