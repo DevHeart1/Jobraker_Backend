@@ -7,6 +7,7 @@ from django.conf.urls.static import static
 from django.contrib import admin
 from django.http import HttpResponse
 from django.urls import include, path
+from django.views.generic.base import RedirectView
 from drf_spectacular.views import (SpectacularAPIView, SpectacularRedocView,
                                    SpectacularSwaggerView)
 
@@ -21,6 +22,8 @@ api_v1_patterns = [
 ]
 
 urlpatterns = [
+    # Redirect root to API docs
+    path("", RedirectView.as_view(url="/api/docs/", permanent=True)),
     # Admin
     path("admin/", admin.site.urls),
     # API Documentation
