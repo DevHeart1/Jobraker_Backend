@@ -1,6 +1,14 @@
 import unittest
-from unittest.mock import patch, MagicMock, call, ANY
-from typing import List, Dict, Any, Optional
+from typing import Any, Dict, List, Optional
+from unittest.mock import ANY
+from unittest.mock import MagicMock
+from unittest.mock import MagicMock as SkyvernMagicMock
+from unittest.mock import call
+from unittest.mock import call as skyvern_call
+from unittest.mock import patch
+from unittest.mock import patch as skyvern_patch
+
+import requests
 
 # Assuming VectorDBService is in apps.common.services
 # from apps.common.services import VectorDBService
@@ -44,7 +52,8 @@ class TestVectorDBService(unittest.TestCase):
         self.MockModelClass.objects.filter = MagicMock()
         self.MockModelClass.objects.all = MagicMock()
 
-        from apps.common.services import VectorDBService # Import service after model is patched
+        from apps.common.services import \
+            VectorDBService  # Import service after model is patched
         self.service = VectorDBService()
         self.service.document_model = self.MockModelClass # Explicitly set the mocked model
 
@@ -279,9 +288,9 @@ if __name__ == '__main__':
 # It's generally better to have separate test files per service if they grow large.
 # For now, adding here as per plan "add to existing for now".
 
-import requests # Added for requests.exceptions used in MockSkyvernResponse
-from unittest.mock import patch as skyvern_patch, MagicMock as SkyvernMagicMock, call as skyvern_call
-
+from unittest.mock import MagicMock as SkyvernMagicMock
+from unittest.mock import call as skyvern_call
+from unittest.mock import patch as skyvern_patch
 
 # Assuming SkyvernAPIClient is in apps.integrations.services.skyvern
 # from apps.integrations.services.skyvern import SkyvernAPIClient
@@ -330,7 +339,8 @@ class TestSkyvernAPIClient(unittest.TestCase):
         self.mock_skyvern_api_errors = self.skyvern_api_errors_patcher.start()
 
 
-        from apps.integrations.services.skyvern import SkyvernAPIClient # Import here after patching settings & requests
+        from apps.integrations.services.skyvern import \
+            SkyvernAPIClient  # Import here after patching settings & requests
         self.client = SkyvernAPIClient()
         # Ensure the client's session is the mocked one
         self.client.session = self.mock_session_instance

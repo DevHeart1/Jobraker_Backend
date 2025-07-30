@@ -1,25 +1,29 @@
-from django.test import TestCase
-from unittest.mock import patch, MagicMock
+from unittest.mock import MagicMock, patch
 
-from apps.jobs.models import Job # Using the actual model to trigger signals
 from django.contrib.auth import get_user_model
+from django.test import TestCase
+
+from apps.jobs.models import Job  # Using the actual model to trigger signals
 
 User = get_user_model()
 
+
 # The signals are in apps.jobs.signals, which imports registry from django_elasticsearch_dsl.registries
 # So we need to patch 'django_elasticsearch_dsl.registries.registry'
-@patch('django_elasticsearch_dsl.registries.registry', new_callable=MagicMock)
+@patch("django_elasticsearch_dsl.registries.registry", new_callable=MagicMock)
 class JobSignalTests(TestCase):
 
     def setUp(self):
         # Create a user for model instances that require a user
-        self.user = User.objects.create_user(email='testsignaluser@example.com', password='password')
+        self.user = User.objects.create_user(
+            email="testsignaluser@example.com", password="password"
+        )
         # Basic job data
         self.job_data = {
-            'title': "Signal Test Job",
-            'company': "Signal Co",
-            'description': "Testing signals for ES.",
-            'location': "Testville",
+            "title": "Signal Test Job",
+            "company": "Signal Co",
+            "description": "Testing signals for ES.",
+            "location": "Testville",
             # Add any other required fields for Job model if they don't have defaults
         }
 
@@ -28,13 +32,12 @@ class JobSignalTests(TestCase):
         job = Job.objects.create(**self.job_data)
         mock_registry.update.assert_called_once_with(job)
 
-        mock_registry.reset_mock() # Reset for the update part
+        mock_registry.reset_mock()  # Reset for the update part
 
         # Test that updating an existing Job instance also calls registry.update()
         job.title = "Signal Test Job Updated"
         job.save()
         mock_registry.update.assert_called_once_with(job)
-
 
     def test_job_post_delete_deletes_from_registry(self, mock_registry):
         """Test that deleting a Job instance calls registry.delete()."""
@@ -68,40 +71,49 @@ class JobSignalTests(TestCase):
         deleted_instance_arg = args[0]
         self.assertEqual(deleted_instance_arg.pk, job_pk)
 
-
-    @patch('apps.jobs.signals.registry.update') # Patch specifically where it's used in the signal
+    @patch(
+        "apps.jobs.signals.registry.update"
+    )  # Patch specifically where it's used in the signal
     def test_job_post_save_signal_error_handling(self, mock_registry_update_in_signal):
         """Test that an error during registry.update is caught in the signal handler."""
         mock_registry_update_in_signal.side_effect = Exception("ES Down!")
 
         # We also need to patch 'print' if we want to assert its call for error logging
-        with patch('apps.jobs.signals.print') as mock_print:
+        with patch("apps.jobs.signals.print") as mock_print:
             try:
                 # This save should trigger the signal, which then encounters the exception
                 Job.objects.create(**self.job_data)
             except Exception as e:
                 # The signal handler should catch the exception and print, not re-raise
-                self.fail(f"Signal handler should not re-raise exception from registry.update: {e}")
+                self.fail(
+                    f"Signal handler should not re-raise exception from registry.update: {e}"
+                )
 
             mock_print.assert_called()
             # Check that the print message contains the error indication
             self.assertIn("Error updating Elasticsearch", mock_print.call_args[0][0])
 
-
-    @patch('apps.jobs.signals.registry.delete') # Patch specifically where it's used
-    def test_job_post_delete_signal_error_handling(self, mock_registry_delete_in_signal):
+    @patch("apps.jobs.signals.registry.delete")  # Patch specifically where it's used
+    def test_job_post_delete_signal_error_handling(
+        self, mock_registry_delete_in_signal
+    ):
         """Test that an error during registry.delete is caught in the signal handler."""
         job = Job.objects.create(**self.job_data)
         mock_registry_delete_in_signal.side_effect = Exception("ES Delete Failed!")
 
-        with patch('apps.jobs.signals.print') as mock_print:
+        with patch("apps.jobs.signals.print") as mock_print:
             try:
                 job.delete()
             except Exception as e:
-                self.fail(f"Signal handler should not re-raise exception from registry.delete: {e}")
+                self.fail(
+                    f"Signal handler should not re-raise exception from registry.delete: {e}"
+                )
 
             mock_print.assert_called()
-            self.assertIn("Error deleting Elasticsearch document", mock_print.call_args[0][0])
+            self.assertIn(
+                "Error deleting Elasticsearch document", mock_print.call_args[0][0]
+            )
+
 
 # Note: These tests assume that the signals in apps.jobs.signals are correctly connected.
 # This is usually handled by importing the signals module in the app's AppConfig.ready() method.

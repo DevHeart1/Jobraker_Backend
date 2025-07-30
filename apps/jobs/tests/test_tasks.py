@@ -388,7 +388,7 @@ class TestApplicationReminderTasks(unittest.TestCase):
         )
         # App 5: Due yesterday, but reminder sent AFTER follow_up_date (e.g. date was moved back) -> should not remind
         self.app5 = ActualApplication.objects.create(
-            user=self.user1, job=self.job1, # Reusing job1, ensure unique_together allows if different user or if test setup handles it
+            user=self.user1,
             # For this test, let's make it a different application by not enforcing unique_together here for simplicity,
             # or ensure it's a different job. Let's use a new job.
             job=ActualJob.objects.create(title="Job E", company="Comp E"),

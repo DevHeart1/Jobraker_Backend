@@ -1,6 +1,8 @@
 from django.core.management.base import BaseCommand
+from django_elasticsearch_dsl.management.commands.search_index import \
+    Command as DslBaseCommand
 from django_elasticsearch_dsl.registries import registry
-from django_elasticsearch_dsl.management.commands.search_index import Command as DslBaseCommand
+
 
 class Command(DslBaseCommand):
     help = "Manages Elasticsearch Jobraker indices (create, rebuild, delete, update)"

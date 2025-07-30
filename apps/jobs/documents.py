@@ -1,33 +1,35 @@
+from django.conf import settings
 from django_elasticsearch_dsl import Document, fields
 from django_elasticsearch_dsl.registries import registry
-from django.conf import settings
+
 from .models import Job
 
 # Get Elasticsearch index name from settings, with a default
-JOB_INDEX_NAME = getattr(settings, 'ELASTICSEARCH_JOB_INDEX_NAME', 'jobraker-jobs')
+JOB_INDEX_NAME = getattr(settings, "ELASTICSEARCH_JOB_INDEX_NAME", "jobraker-jobs")
+
 
 @registry.register_document
 class JobDocument(Document):
     # Define common text field settings with an English analyzer
     english_text_field = fields.TextField(
-        analyzer='english',
-        fields={'raw': fields.KeywordField()} # For exact matches or aggregations
+        analyzer="english",
+        fields={"raw": fields.KeywordField()},  # For exact matches or aggregations
     )
 
     title = english_text_field
-    company_name = fields.TextField( # Using a different name to avoid conflict with 'company' object if Job model had FK
-        attr='company', # Maps to Job.company field
-        analyzer='english',
-        fields={'raw': fields.KeywordField()}
+    company_name = fields.TextField(  # Using a different name to avoid conflict with 'company' object if Job model had FK
+        attr="company",  # Maps to Job.company field
+        analyzer="english",
+        fields={"raw": fields.KeywordField()},
     )
-    description = fields.TextField(analyzer='english')
-    requirements = fields.TextField(analyzer='english', required=False) # Mark as not required if blank=True in model
-    benefits = fields.TextField(analyzer='english', required=False)
+    description = fields.TextField(analyzer="english")
+    requirements = fields.TextField(
+        analyzer="english", required=False
+    )  # Mark as not required if blank=True in model
+    benefits = fields.TextField(analyzer="english", required=False)
 
-    location_text = fields.TextField( # For full-text search on location string
-        attr='location',
-        analyzer='english',
-        fields={'raw': fields.KeywordField()}
+    location_text = fields.TextField(  # For full-text search on location string
+        attr="location", analyzer="english", fields={"raw": fields.KeywordField()}
     )
     city = fields.KeywordField()
     state = fields.KeywordField()
@@ -46,19 +48,23 @@ class JobDocument(Document):
     # For JSONFields skills_required, skills_preferred, technologies:
     # We can index them as list of keywords or as a single text field.
     # Using TextField here to make them searchable as text, can also use KeywordField for exact matches.
-    skills_required_text = fields.TextField(analyzer='english', multi=True) # 'multi=True' for lists of strings
-    skills_preferred_text = fields.TextField(analyzer='english', multi=True)
-    technologies_text = fields.TextField(analyzer='english', multi=True)
+    skills_required_text = fields.TextField(
+        analyzer="english", multi=True
+    )  # 'multi=True' for lists of strings
+    skills_preferred_text = fields.TextField(analyzer="english", multi=True)
+    technologies_text = fields.TextField(analyzer="english", multi=True)
 
     external_source = fields.KeywordField(required=False)
-    external_url = fields.KeywordField(required=False) # Keyword if not searching within URL, Text if so
+    external_url = fields.KeywordField(
+        required=False
+    )  # Keyword if not searching within URL, Text if so
     company_logo_url = fields.KeywordField(required=False)
 
-    status = fields.KeywordField() # Job status like 'active', 'closed'
+    status = fields.KeywordField()  # Job status like 'active', 'closed'
     posted_date = fields.DateField(required=False)
     application_deadline = fields.DateField(required=False)
 
-    created_at = fields.DateField() # For sorting by creation if needed
+    created_at = fields.DateField()  # For sorting by creation if needed
     updated_at = fields.DateField()
 
     class Index:
@@ -66,12 +72,12 @@ class JobDocument(Document):
         name = JOB_INDEX_NAME
         # See Elasticsearch Indices API reference for available settings
         settings = {
-            'number_of_shards': 1,
-            'number_of_replicas': 0 # For local dev; adjust for production
+            "number_of_shards": 1,
+            "number_of_replicas": 0,  # For local dev; adjust for production
         }
 
     class Django:
-        model = Job # The model associated with this Document
+        model = Job  # The model associated with this Document
 
         # The fields of the model you want to be indexed in Elasticsearch
         fields = [
@@ -84,7 +90,6 @@ class JobDocument(Document):
         ]
         # Optional: Paginate the queryset used to build the index
         # queryset_pagination = 5000
-
 
     # Methods to prepare data for complex fields (like JSONField)
     def prepare_skills_required_text(self, instance):

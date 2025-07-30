@@ -1,21 +1,29 @@
-from django.db.models.signals import post_save, post_delete
+import logging
+
+from django.db.models.signals import post_delete, post_save
 from django.dispatch import receiver
-from .models import KnowledgeArticle
+
 # Ensure this task path is correct based on where you defined it.
 # If tasks.py is in apps.integrations, this import is fine.
 from apps.integrations.tasks import process_knowledge_article_for_rag_task
-import logging
+
+from .models import KnowledgeArticle
 
 logger = logging.getLogger(__name__)
 
+
 @receiver(post_save, sender=KnowledgeArticle)
-def knowledge_article_post_save(sender, instance: KnowledgeArticle, created: bool, **kwargs):
+def knowledge_article_post_save(
+    sender, instance: KnowledgeArticle, created: bool, **kwargs
+):
     """
     Signal handler for when a KnowledgeArticle instance is saved.
     If the article is active, it triggers a Celery task to process it for RAG.
     If it's made inactive, it also triggers the task to potentially remove it from RAG.
     """
-    logger.info(f"KnowledgeArticle post_save signal triggered for article ID: {instance.id}, active: {instance.is_active}")
+    logger.info(
+        f"KnowledgeArticle post_save signal triggered for article ID: {instance.id}, active: {instance.is_active}"
+    )
     # The task itself handles the logic for active (embed & add) vs inactive (delete from RAG)
     process_knowledge_article_for_rag_task.delay(instance.id)
     logger.info(f"Queued RAG processing task for KnowledgeArticle ID: {instance.id}")
@@ -48,8 +56,12 @@ def knowledge_article_post_delete(sender, instance: KnowledgeArticle, **kwargs):
     No separate action needed for post_delete if making it inactive first is the standard workflow.
     However, if a direct delete of an active article should clean RAG, we'd add:
     """
-    logger.info(f"KnowledgeArticle post_delete signal triggered for article ID: {instance.id}")
+    logger.info(
+        f"KnowledgeArticle post_delete signal triggered for article ID: {instance.id}"
+    )
     # The updated task now handles DoesNotExist gracefully by deleting from the vector store.
     # This ensures that even if an active article is deleted directly, it gets cleaned up from RAG.
     process_knowledge_article_for_rag_task.delay(instance.id)
-    logger.info(f"Queued RAG cleanup task for deleted KnowledgeArticle ID: {instance.id}")
+    logger.info(
+        f"Queued RAG cleanup task for deleted KnowledgeArticle ID: {instance.id}"
+    )
