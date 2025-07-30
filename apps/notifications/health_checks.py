@@ -32,7 +32,7 @@ def health_check(request):
         "status": "healthy",
         "timestamp": datetime.now().isoformat(),
         "system": "jobraker-communication",
-        "message": "Service is up and running. More detailed checks are available at /api/v1/notifications/health/production/."
+        "message": f"Service is up and running. More detailed checks are available at {reverse('production_health_check')}."
     }
     return JsonResponse(health_status, status=200)
 
