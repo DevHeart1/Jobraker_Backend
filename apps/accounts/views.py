@@ -291,17 +291,7 @@ class UserProfileViewSet(viewsets.ModelViewSet):
     summary="Register new user",
     description="Create a new user account with email and password. Returns JWT tokens for immediate authentication.",
     tags=["Authentication"],
-    request=OpenApiExample(
-        "Registration Request",
-        summary="User registration data",
-        description="Required information for creating a new user account",
-        value={
-            "email": "user@example.com",
-            "password": "securePassword123!",
-            "first_name": "John",
-            "last_name": "Doe",
-        },
-    ),
+    request=UserRegistrationSerializer,
     responses={
         201: OpenApiExample(
             "Registration Success",
@@ -337,6 +327,7 @@ class RegisterView(APIView):
     """
 
     permission_classes = [permissions.AllowAny]
+    serializer_class = UserRegistrationSerializer
 
     def post(self, request):
         """
@@ -344,49 +335,20 @@ class RegisterView(APIView):
 
         Validates input data, creates user account, and returns JWT tokens.
         """
-        # TODO: Implement proper serializer-based registration
-        email = request.data.get("email")
-        password = request.data.get("password")
-        first_name = request.data.get("first_name", "")
-        last_name = request.data.get("last_name", "")
-
-        if not email or not password:
+        serializer = self.serializer_class(data=request.data)
+        if serializer.is_valid():
+            user = serializer.save()
+            refresh = RefreshToken.for_user(user)
             return Response(
-                {"error": "Email and password are required"},
-                status=status.HTTP_400_BAD_REQUEST,
+                {
+                    "message": "User registered successfully",
+                    "user_id": user.id,
+                    "access": str(refresh.access_token),
+                    "refresh": str(refresh),
+                },
+                status=status.HTTP_201_CREATED,
             )
-
-        try:
-            validate_password(password)
-        except ValidationError as e:
-            return Response({"error": e.messages}, status=status.HTTP_400_BAD_REQUEST)
-
-        if User.objects.filter(email=email).exists():
-            return Response(
-                {"error": "User with this email already exists"},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-
-        user = User.objects.create_user(
-            username=email,
-            email=email,
-            password=password,
-            first_name=first_name,
-            last_name=last_name,
-        )
-
-        # Create refresh token
-        refresh = RefreshToken.for_user(user)
-
-        return Response(
-            {
-                "message": "User registered successfully",
-                "user_id": user.id,
-                "access": str(refresh.access_token),
-                "refresh": str(refresh),
-            },
-            status=status.HTTP_201_CREATED,
-        )
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
 
 @extend_schema(

@@ -37,7 +37,7 @@ class UserRegistrationSerializer(serializers.ModelSerializer):
 
     def validate(self, attrs):
         """Validate password confirmation and strength."""
-        if attrs["password"] != attrs["password_confirm"]:
+        if attrs["password"] != attrs.pop("password_confirm"):
             raise serializers.ValidationError("Passwords don't match")
 
         try:
@@ -49,7 +49,6 @@ class UserRegistrationSerializer(serializers.ModelSerializer):
 
     def create(self, validated_data):
         """Create user with validated data."""
-        validated_data.pop("password_confirm")
         user = User.objects.create_user(**validated_data)
         return user
 
