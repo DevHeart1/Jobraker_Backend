@@ -292,6 +292,21 @@ class UserProfileViewSet(viewsets.ModelViewSet):
     description="Create a new user account with email and password. Returns JWT tokens for immediate authentication.",
     tags=["Authentication"],
     request=UserRegistrationSerializer,
+    examples=[
+        OpenApiExample(
+            "New User Registration",
+            summary="Example request for registering a new user",
+            description="Provide email, password, and confirmation. First and last names are optional.",
+            value={
+                "email": "user@example.com",
+                "password": "a_strong_password",
+                "password_confirm": "a_strong_password",
+                "first_name": "John",
+                "last_name": "Doe",
+            },
+            request_only=True,
+        )
+    ],
     responses={
         201: OpenApiExample(
             "Registration Success",
